@@ -36,9 +36,12 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     db.init_app(app)
     login_manager.init_app(app)
     csrf.init_app(app)
-    # SECURITY: restrict WebSocket connections to this origin only (§11).
+    # SECURITY: restrict WebSocket connections to exact app HTTPS origins (§11).
     # Cross-origin WebSocket requests are rejected automatically.
-    socketio.init_app(app, cors_allowed_origins="https://localhost:5000")
+    socketio.init_app(
+        app,
+        cors_allowed_origins=["https://localhost:5000", "https://127.0.0.1:5000"],
+    )
 
     # Register blueprints.
     from auth import auth_bp  # noqa: PLC0415 — deferred to avoid circular import
@@ -62,7 +65,11 @@ def _register_user_loader() -> None:
     def load_user(user_id: str) -> "User | None":
         # SECURITY: query by integer primary key only; never by username or
         # any user-supplied string to prevent injection via the session cookie.
-        return db.session.get(User, int(user_id))
+        try:
+            uid = int(user_id)
+        except (ValueError, TypeError):
+            return None
+        return db.session.get(User, uid)
 
 
 def _register_login_manager(app: Flask) -> None:

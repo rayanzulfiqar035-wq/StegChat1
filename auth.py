@@ -14,6 +14,7 @@ Security notes are inline with ``# SECURITY:`` markers.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
@@ -172,8 +173,16 @@ def login() -> str:
             # Redirect to the page the user originally wanted, or /chat.
             next_page = request.args.get("next")
             # SECURITY: only allow relative next-URLs to prevent open redirect.
-            if next_page and next_page.startswith("/"):
-                return redirect(next_page)
+            # Rejects protocol-relative URLs (//evil.com) and non-local schemes.
+            if next_page:
+                parsed = urlsplit(next_page)
+                if (
+                    not parsed.netloc
+                    and not parsed.scheme
+                    and next_page.startswith("/")
+                    and not next_page.startswith(("//", "/\\"))
+                ):
+                    return redirect(next_page)
             return redirect(url_for("auth.chat_placeholder"))
 
         # SECURITY: one generic message for wrong username AND wrong password.
