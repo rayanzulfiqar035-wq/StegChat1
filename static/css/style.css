@@ -413,3 +413,78 @@ a {
 .message-input:focus {
   border-color: var(--accent);
 }
+
+/* ── Key Management & Fingerprints (Step 5) ────────────────────────────── */
+
+.is-hidden {
+  display: none !important;
+}
+
+.user-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.fingerprint-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  max-width: fit-content;
+}
+
+.fingerprint-badge .mono {
+  color: var(--accent);
+  letter-spacing: 0.05em;
+}
+
+.contact-security-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  background-color: var(--surface);
+  border-left: 3px solid var(--accent);
+  padding: 0.35rem 0.75rem;
+  border-radius: calc(var(--radius) / 4);
+}
+
+.contact-security-bar .mono {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.security-alert {
+  background-color: color-mix(in srgb, var(--danger) 15%, var(--surface-raised));
+  border: 1px solid var(--danger);
+  border-radius: calc(var(--radius) / 2);
+  padding: var(--space-2);
+}
+
+.alert-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.alert-content strong {
+  color: var(--danger);
+  font-size: 0.95rem;
+}
+
+.alert-content p {
+  margin: 0;
+  font-size: 0.85rem;
+  white-space: pre-line;
+}
+
+.alert-actions {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: 0.25rem;
+}

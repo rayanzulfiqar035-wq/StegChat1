@@ -45,7 +45,9 @@ def create_app(config_class: type[Config] = Config) -> Flask:
 
     # Register blueprints.
     from auth import auth_bp  # noqa: PLC0415 — deferred to avoid circular import
+    from api import api_bp    # noqa: PLC0415
     app.register_blueprint(auth_bp)
+    app.register_blueprint(api_bp)
 
     # Register Socket.IO event handlers.
     import events  # noqa: F401, PLC0415

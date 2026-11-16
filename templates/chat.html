@@ -4,16 +4,32 @@
 {% block content %}
 <section class="panel chat-panel">
   <div class="chat-header">
-    <div>
-      <span class="muted">Logged in as:</span>
-      <strong id="current-username" class="username-label">{{ current_user.username }}</strong>
+    <div class="user-meta">
+      <div>
+        <span class="muted">Logged in as:</span>
+        <strong id="current-username" class="username-label">{{ current_user.username }}</strong>
+      </div>
+      <div class="fingerprint-badge" id="my-fingerprint-box" title="Your public key fingerprint">
+        <span class="muted">Your Key:</span>
+        <span id="my-fingerprint" class="mono">Loading...</span>
+      </div>
     </div>
+
     {# SECURITY: logout is a POST with a CSRF token; a plain link would allow
        a third-party page to log the user out with a GET request. #}
     <form method="post" action="{{ url_for('auth.logout') }}" class="logout-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button type="submit" class="btn btn--ghost btn--small">Log out</button>
     </form>
+  </div>
+
+  {# Prominent security banner for key loss warnings or contact key changes #}
+  <div id="security-alert" class="security-alert is-hidden" role="alert">
+    <div class="alert-content">
+      <strong id="alert-title">Security Alert</strong>
+      <p id="alert-message"></p>
+      <div id="alert-actions" class="alert-actions"></div>
+    </div>
   </div>
 
   <div class="recipient-bar">
@@ -27,6 +43,11 @@
       spellcheck="false"
       required
     >
+  </div>
+
+  <div id="contact-security-bar" class="contact-security-bar is-hidden">
+    <span class="muted">Contact Key:</span>
+    <span id="contact-fingerprint" class="mono"></span>
   </div>
 
   <div id="messages-list" class="messages-list" aria-live="polite" aria-label="Messages">
