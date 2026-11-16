@@ -84,7 +84,11 @@ class Config:
     # sent with cross-site requests (no CSRF-by-cookie-relay).
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
-    MAX_CONTENT_LENGTH = 8 * 1024 * 1024
+    # SECURITY: only send the session cookie over HTTPS connections.
+    SESSION_COOKIE_SECURE = True
+    # Cap incoming request bodies to slightly above the largest allowed envelope
+    # (MAX_STEGO_BYTES = 3 MiB) to prevent memory exhaustion via oversized uploads.
+    MAX_CONTENT_LENGTH = MAX_STEGO_BYTES + 65536  # 3 MiB + 64 KiB headroom
 
     @classmethod
     def validate(cls) -> None:

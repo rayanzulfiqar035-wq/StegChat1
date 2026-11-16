@@ -35,7 +35,9 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     db.init_app(app)
     login_manager.init_app(app)
     csrf.init_app(app)
-    socketio.init_app(app)
+    # SECURITY: restrict WebSocket connections to this origin only (§11).
+    # Cross-origin WebSocket requests are rejected automatically.
+    socketio.init_app(app, cors_allowed_origins="https://localhost:5000")
 
     _register_login_stub()
     _register_routes(app)
@@ -48,6 +50,8 @@ def _register_login_stub() -> None:
     Flask-Login refuses to build a request context (and therefore any template)
     without a user loader. Step 1 has no accounts, so every request is anonymous.
     Step 2 registers the real loader that reads `User` from the database.
+
+    # TEMP: remove and replace with the real user_loader in Step 2.
     """
 
     @login_manager.user_loader
