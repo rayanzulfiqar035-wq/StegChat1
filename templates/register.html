@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Register — Secure Chat{% endblock %}
+
+{% block content %}
+<section class="panel auth-panel">
+  <h1>Create account</h1>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <p class="flash flash--{{ category }}">{{ message }}</p>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="post" action="{{ url_for('auth.register') }}" novalidate>
+    {# SECURITY: CSRF token from Flask-WTF; rejects cross-site form submissions. #}
+    {{ form.hidden_tag() }}
+
+    <div class="field">
+      {{ form.username.label }}
+      {{ form.username(autocomplete="username", spellcheck="false") }}
+      {% for error in form.username.errors %}
+        <span class="field-error">{{ error }}</span>
+      {% endfor %}
+    </div>
+
+    <div class="field">
+      {{ form.password.label }}
+      {{ form.password(autocomplete="new-password") }}
+      {% for error in form.password.errors %}
+        <span class="field-error">{{ error }}</span>
+      {% endfor %}
+      <span class="field-hint">At least 12 characters.</span>
+    </div>
+
+    <div class="field">
+      {{ form.confirm.label }}
+      {{ form.confirm(autocomplete="new-password") }}
+      {% for error in form.confirm.errors %}
+        <span class="field-error">{{ error }}</span>
+      {% endfor %}
+    </div>
+
+    <div class="form-actions">
+      {{ form.submit(class="btn btn--primary") }}
+    </div>
+  </form>
+
+  <p class="auth-alt">Already have an account? <a href="{{ url_for('auth.login') }}">Log in</a></p>
+</section>
+{% endblock %}

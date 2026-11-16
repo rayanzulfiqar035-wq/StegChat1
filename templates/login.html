@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Log in — Secure Chat{% endblock %}
+
+{% block content %}
+<section class="panel auth-panel">
+  <h1>Log in</h1>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <p class="flash flash--{{ category }}">{{ message }}</p>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="post" action="{{ url_for('auth.login') }}" novalidate>
+    {# SECURITY: CSRF token from Flask-WTF; rejects cross-site form submissions. #}
+    {{ form.hidden_tag() }}
+
+    <div class="field">
+      {{ form.username.label }}
+      {{ form.username(autocomplete="username", spellcheck="false") }}
+      {% for error in form.username.errors %}
+        <span class="field-error">{{ error }}</span>
+      {% endfor %}
+    </div>
+
+    <div class="field">
+      {{ form.password.label }}
+      {{ form.password(autocomplete="current-password") }}
+      {% for error in form.password.errors %}
+        <span class="field-error">{{ error }}</span>
+      {% endfor %}
+    </div>
+
+    <div class="form-actions">
+      {{ form.submit(class="btn btn--primary") }}
+    </div>
+  </form>
+
+  <p class="auth-alt">No account yet? <a href="{{ url_for('auth.register') }}">Register</a></p>
+</section>
+{% endblock %}

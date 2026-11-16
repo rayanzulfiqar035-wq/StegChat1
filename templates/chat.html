@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Chat — Secure Chat{% endblock %}
+
+{% block content %}
+<section class="panel chat-placeholder">
+  <div class="chat-header">
+    <span>Logged in as <strong class="username-label">{{ current_user.username }}</strong></span>
+    {# SECURITY: logout is a POST with a CSRF token; a plain link would allow
+       a third-party page to log the user out with a GET request. #}
+    <form method="post" action="{{ url_for('auth.logout') }}" class="logout-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn btn--ghost btn--small">Log out</button>
+    </form>
+  </div>
+  <p class="muted">Encrypted chat arrives in Step 4.</p>
+</section>
+{% endblock %}

@@ -1,8 +1,8 @@
 """Application factory and development entry point for the secure chat server.
 
-Step 1 only serves a placeholder page: accounts, models and chat arrive in later
-steps. The factory is written so those steps can plug in blueprints without
-touching the wiring here.
+Step 1 built the skeleton; Step 2 adds accounts (register, login, logout).
+Later steps plug in additional blueprints and Socket.IO handlers without
+touching this wiring.
 """
 
 from __future__ import annotations
@@ -39,32 +39,46 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     # Cross-origin WebSocket requests are rejected automatically.
     socketio.init_app(app, cors_allowed_origins="https://localhost:5000")
 
-    _register_login_stub()
+    # Register blueprints.
+    from auth import auth_bp  # noqa: PLC0415 — deferred to avoid circular import
+    app.register_blueprint(auth_bp)
+
+    # Create all database tables (SQLite file lives under instance/).
+    with app.app_context():
+        db.create_all()
+
+    _register_user_loader()
+    _register_login_manager(app)
     _register_routes(app)
     return app
 
 
-def _register_login_stub() -> None:
-    """TEMP: satisfy Flask-Login until the User model exists in Step 2.
-
-    Flask-Login refuses to build a request context (and therefore any template)
-    without a user loader. Step 1 has no accounts, so every request is anonymous.
-    Step 2 registers the real loader that reads `User` from the database.
-
-    # TEMP: remove and replace with the real user_loader in Step 2.
-    """
+def _register_user_loader() -> None:
+    """Register the Flask-Login user loader that reads `User` from the DB."""
+    from models import User  # noqa: PLC0415
 
     @login_manager.user_loader
-    def _load_anonymous_user(_user_id: str) -> None:
-        return None
+    def load_user(user_id: str) -> "User | None":
+        # SECURITY: query by integer primary key only; never by username or
+        # any user-supplied string to prevent injection via the session cookie.
+        return db.session.get(User, int(user_id))
+
+
+def _register_login_manager(app: Flask) -> None:
+    """Configure Flask-Login behaviour for unauthenticated requests."""
+    # Redirect unauthenticated users to /login with a neutral flash message.
+    login_manager.login_view = "auth.login"  # type: ignore[assignment]
+    # SECURITY: "strong" session protection regenerates the session on
+    # IP or user-agent change, limiting session-fixation and hijacking risk.
+    login_manager.session_protection = "strong"
 
 
 def _register_routes(app: Flask) -> None:
-    """Register the placeholder routes that exist in Step 1."""
+    """Register top-level routes (placeholder index from Step 1)."""
 
     @app.get("/")
     def index() -> str:
-        """Render the "server running" placeholder page."""
+        """Render the server-running placeholder page."""
         return render_template("base.html")
 
 
