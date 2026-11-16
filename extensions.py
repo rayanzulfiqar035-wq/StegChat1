@@ -23,4 +23,9 @@ login_manager.session_protection = "strong"
 csrf = CSRFProtect()
 
 # Threading mode with simple-websocket: no eventlet/gevent monkey patching.
-socketio = SocketIO(async_mode="threading")
+# SECURITY: restrict WebSocket origins to exact app HTTPS origins (§11).
+socketio = SocketIO(
+    async_mode="threading",
+    cors_allowed_origins=["https://localhost:5000", "https://127.0.0.1:5000"],
+    max_http_buffer_size=5_000_000,
+)

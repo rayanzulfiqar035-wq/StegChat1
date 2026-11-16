@@ -47,6 +47,9 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     from auth import auth_bp  # noqa: PLC0415 — deferred to avoid circular import
     app.register_blueprint(auth_bp)
 
+    # Register Socket.IO event handlers.
+    import events  # noqa: F401, PLC0415
+
     # Create all database tables (SQLite file lives under instance/).
     with app.app_context():
         db.create_all()

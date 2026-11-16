@@ -2,9 +2,12 @@
 {% block title %}Chat — Secure Chat{% endblock %}
 
 {% block content %}
-<section class="panel chat-placeholder">
+<section class="panel chat-panel">
   <div class="chat-header">
-    <span>Logged in as <strong class="username-label">{{ current_user.username }}</strong></span>
+    <div>
+      <span class="muted">Logged in as:</span>
+      <strong id="current-username" class="username-label">{{ current_user.username }}</strong>
+    </div>
     {# SECURITY: logout is a POST with a CSRF token; a plain link would allow
        a third-party page to log the user out with a GET request. #}
     <form method="post" action="{{ url_for('auth.logout') }}" class="logout-form">
@@ -12,6 +15,43 @@
       <button type="submit" class="btn btn--ghost btn--small">Log out</button>
     </form>
   </div>
-  <p class="muted">Encrypted chat arrives in Step 4.</p>
+
+  <div class="recipient-bar">
+    <label for="recipient-input">To:</label>
+    <input
+      type="text"
+      id="recipient-input"
+      class="recipient-input"
+      placeholder="Recipient username"
+      autocomplete="off"
+      spellcheck="false"
+      required
+    >
+  </div>
+
+  <div id="messages-list" class="messages-list" aria-live="polite" aria-label="Messages">
+    <!-- Messages are appended dynamically via textContent in chat.js -->
+  </div>
+
+  <div id="chat-status" class="chat-status" role="status" aria-live="polite"></div>
+
+  <form id="chat-form" class="chat-form" novalidate>
+    <input
+      type="text"
+      id="message-input"
+      class="message-input"
+      placeholder="Type a message (max 2000 characters)..."
+      maxlength="2000"
+      autocomplete="off"
+      required
+    >
+    <button type="submit" id="send-btn" class="btn btn--primary">Send</button>
+  </form>
 </section>
+{% endblock %}
+
+{% block scripts %}
+{# Vendor script loaded from local static files; no CDN links per Rule 8. #}
+<script src="{{ url_for('static', filename='js/vendor/socket.io.min.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='js/chat.js') }}"></script>
 {% endblock %}
