@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# SECURITY: read by static/js/*.js for the X-CSRFToken header; never inline JS. #}
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>{% block title %}Secure Chat{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <span class="brand">Secure Chat</span>
+    <nav class="site-nav" aria-label="Main">
+      {# Navigation items are added in later steps. #}
+    </nav>
+  </header>
+
+  <main class="site-main" id="main">
+    {% block content %}
+    <section class="panel">
+      <h1>Server running</h1>
+      <p>The secure chat server is up and serving this placeholder page.</p>
+      <p class="muted">Accounts and encrypted chat arrive in the next steps.</p>
+    </section>
+    {% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <p class="muted">Course project &mdash; end-to-end encrypted messaging.</p>
+  </footer>
+</body>
+</html>

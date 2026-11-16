@@ -1,0 +1,149 @@
+/* Base styles for the secure chat UI.
+   Deliberately dependency-free: no CDN fonts, no external assets, so the
+   Content-Security-Policy added in Step 8 can stay strict. */
+
+:root {
+  --bg: #12140f;
+  --surface: #1b1e17;
+  --surface-raised: #23271d;
+  --border: #343a2b;
+  --text: #e8e6dc;
+  --text-muted: #a3a68f;
+  --accent: #d8b34a;
+  --danger: #d1584f;
+  --radius: 10px;
+  --space-1: 0.5rem;
+  --space-2: 1rem;
+  --space-3: 1.5rem;
+  --space-4: 2.5rem;
+  --font-body: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 var(--space-2);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: 1.6rem;
+}
+
+p {
+  margin: 0 0 var(--space-2);
+}
+
+a {
+  color: var(--accent);
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  padding: var(--space-1) var(--space-2);
+  background-color: var(--accent);
+  color: #12140f;
+  z-index: 10;
+}
+
+.skip-link:focus {
+  left: var(--space-2);
+  top: var(--space-1);
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background-color: var(--surface);
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+.site-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.site-main {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-3);
+}
+
+.panel {
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+}
+
+.site-footer {
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.site-footer p {
+  margin: 0;
+}
+
+@media (max-width: 30rem) {
+  .site-main {
+    padding: var(--space-3) var(--space-2);
+  }
+
+  .site-header,
+  .site-footer {
+    padding-left: var(--space-2);
+    padding-right: var(--space-2);
+  }
+}
