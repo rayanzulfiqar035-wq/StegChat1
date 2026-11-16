@@ -10,7 +10,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from flask import Flask, render_template
+from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask_wtf.csrf import CSRFError
+from werkzeug.exceptions import HTTPException
 
 from config import Config, ConfigError
 from extensions import csrf, db, login_manager, socketio
@@ -36,6 +38,14 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     db.init_app(app)
     login_manager.init_app(app)
     csrf.init_app(app)
+
+    @app.errorhandler(HTTPException)
+    def handle_http_error(error: HTTPException):
+        """Keep API failures JSON, including CSRF and oversized requests."""
+        if request.path.startswith("/api/"):
+            message = "CSRF validation failed" if isinstance(error, CSRFError) else error.name
+            return jsonify({"error": message}), error.code
+        return error
     # SECURITY: restrict WebSocket connections to exact app HTTPS origins (§11).
     # Cross-origin WebSocket requests are rejected automatically.
     socketio.init_app(
@@ -51,6 +61,7 @@ def create_app(config_class: type[Config] = Config) -> Flask:
 
     # Register Socket.IO event handlers.
     import events  # noqa: F401, PLC0415
+    events.register_handlers()
 
     # Create all database tables (SQLite file lives under instance/).
     with app.app_context():
@@ -84,6 +95,13 @@ def _register_login_manager(app: Flask) -> None:
     # SECURITY: "strong" session protection regenerates the session on
     # IP or user-agent change, limiting session-fixation and hijacking risk.
     login_manager.session_protection = "strong"
+
+    @login_manager.unauthorized_handler
+    def unauthorized():
+        """Use JSON for API callers and a login redirect for HTML pages."""
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "authentication required"}), 401
+        return redirect(url_for("auth.login", next=request.path))
 
 
 def _register_routes(app: Flask) -> None:

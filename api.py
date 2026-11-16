@@ -18,7 +18,12 @@ Security:
 from __future__ import annotations
 
 import base64
+import binascii
 import json
+import logging
+import re
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, jsonify, request
@@ -30,6 +35,37 @@ from models import User
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
 _ALLOWED_JWK_KEYS = frozenset({"kty", "crv", "x", "y"})
+
+
+def _write_audit_log(event: str, username: str) -> None:
+    """Write a non-secret audit line for key-management events.
+
+    This uses the standard library logging system and rotates the file to keep
+    the audit trail bounded, without ever recording keys, ciphertext, hashes or
+    other sensitive data.
+    """
+    try:
+        log_dir = Path(__file__).resolve().parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+
+        logger = logging.getLogger("secure_chat.audit")
+        if not logger.handlers:
+            handler = RotatingFileHandler(
+                log_dir / "audit.log",
+                maxBytes=1_048_576,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+            logger.propagate = False
+
+        logger.info("event=%s username=%s", event, username)
+    except OSError:
+        # The audit log is a security aid; a write failure must not block key
+        # upload/reset operations or leak secrets in an exception response.
+        pass
 
 
 def _validate_ec_public_jwk(jwk: Any) -> dict[str, str]:
@@ -58,16 +94,18 @@ def _validate_ec_public_jwk(jwk: Any) -> dict[str, str]:
 
     for coord in ("x", "y"):
         val = jwk.get(coord)
-        if not isinstance(val, str) or not val:
-            raise ValueError(f"Coordinate '{coord}' must be a non-empty string")
+        if not isinstance(val, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}=?", val):
+            raise ValueError(f"Coordinate '{coord}' is not valid base64url")
         try:
-            # base64url without padding or with padding
             padded = val + "=" * (-len(val) % 4)
-            decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
-        except Exception as exc:
+            decoded = base64.b64decode(padded, altchars=b"-_", validate=True)
+        except (binascii.Error, ValueError) as exc:
             raise ValueError(f"Coordinate '{coord}' is not valid base64url") from exc
         if len(decoded) != 32:
             raise ValueError(f"Coordinate '{coord}' must be 32 bytes, got {len(decoded)}")
+        # SECURITY: reject alternate encodings with nonzero unused padding bits.
+        if base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=") != val.rstrip("="):
+            raise ValueError(f"Coordinate '{coord}' is not canonical base64url")
 
     return {
         "kty": str(jwk["kty"]),
@@ -114,6 +152,7 @@ def post_keys() -> Any:
     current_user.ecdh_public_jwk = json.dumps(ecdh_clean, separators=(",", ":"))
     current_user.ecdsa_public_jwk = json.dumps(ecdsa_clean, separators=(",", ":"))
     db.session.commit()
+    _write_audit_log("keys_uploaded", current_user.username)
 
     return jsonify({"ok": True}), 201
 
@@ -138,6 +177,7 @@ def put_keys() -> Any:
     current_user.ecdh_public_jwk = json.dumps(ecdh_clean, separators=(",", ":"))
     current_user.ecdsa_public_jwk = json.dumps(ecdsa_clean, separators=(",", ":"))
     db.session.commit()
+    _write_audit_log("keys_reset", current_user.username)
 
     return jsonify({"ok": True}), 200
 

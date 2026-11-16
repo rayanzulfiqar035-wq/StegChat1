@@ -1,410 +1,320 @@
-/**
- * Real-time chat client with Key Management & TOFU (Step 5).
- *
- * Cryptography: Web Crypto API via crypto.js.
- * Storage: IndexedDB via keystore.js.
- *
- * SECURITY:
- * - Private keys are non-extractable and never leave IndexedDB (Rule 1).
- * - DOM manipulation strictly uses textContent / createTextNode (Rule 7).
- * - Rejects any inline scripts, inline styles, or external CDN dependencies.
- */
-
+/** Step 6 chat: browser-only keys, explicit contact trust, signed ciphertext. */
 import {
-  generateIdentity,
-  exportPublicJwk,
-  fingerprint,
-  fingerprintFromJwks,
+  generateIdentity, exportPublicJwk, fingerprint, fingerprintFromJwks,
+  encryptText, assertTextEnvelope, verifyTextSignature, assertTimestamp,
+  signatureHash, decryptText, importPeerEcdsa, selfTest,
 } from "./crypto.js";
+import { getIdentity, saveIdentity, getContact, saveContact, hasSeenSignature, markSignatureSeen } from "./keystore.js";
 
-import {
-  getIdentity,
-  saveIdentity,
-  clearIdentity,
-  getContact,
-  saveContact,
-} from "./keystore.js";
-
-// Read CSRF token from base template meta tag for state-changing requests
-const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-const CSRF_TOKEN = csrfMeta ? csrfMeta.getAttribute("content") : "";
-
-// Connect strictly using WebSockets over the current secure origin (WSS).
-const socket = io({
-  transports: ["websocket"],
-});
-
-const currentUsernameElem = document.getElementById("current-username");
-const currentUsername = currentUsernameElem ? currentUsernameElem.textContent.trim().toLowerCase() : "";
-
-const myFingerprintElem = document.getElementById("my-fingerprint");
-const securityAlert = document.getElementById("security-alert");
-const alertTitle = document.getElementById("alert-title");
-const alertMessage = document.getElementById("alert-message");
-const alertActions = document.getElementById("alert-actions");
-
-const contactSecurityBar = document.getElementById("contact-security-bar");
-const contactFingerprintElem = document.getElementById("contact-fingerprint");
-
-const messagesList = document.getElementById("messages-list");
-const chatStatus = document.getElementById("chat-status");
-const chatForm = document.getElementById("chat-form");
-const recipientInput = document.getElementById("recipient-input");
-const messageInput = document.getElementById("message-input");
-const sendBtn = document.getElementById("send-btn");
-
+if (typeof io !== "function") throw new Error("Socket.IO client not loaded");
+const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
+const element = (id) => document.getElementById(id);
+const currentUsername = element("current-username").textContent.trim().toLowerCase();
+const recipientInput = element("recipient-input");
+const messageInput = element("message-input");
+const sendButton = element("send-btn");
+const selectedRecipient = () => recipientInput.value.trim().toLowerCase();
+// SECURITY: stay offline until private identity initialization has completed.
+const socket = io({ transports: ["websocket"], autoConnect: false });
+const changedContacts = new Map();
 let localIdentity = null;
 let currentRecipientKeyData = null;
-let isSendingBlocked = false;
-
-// ---------------------------------------------------------------------------
-// UI Alerts & Notifications
-// ---------------------------------------------------------------------------
+let contactRequest = 0;
+let checkingContact = false;
+let sending = false;
+let settingUpIdentity = false;
+let recipientTimer;
+let incomingQueue = Promise.resolve();
 
 function setStatus(text, type = "info") {
-  if (!chatStatus) return;
-  chatStatus.textContent = text;
-  chatStatus.className = `chat-status chat-status--${type}`;
+  element("chat-status").textContent = text;
+  element("chat-status").className = `chat-status chat-status--${type}`;
 }
-
+function updateSendButton() {
+  sendButton.disabled = !localIdentity || !socket.connected || checkingContact || sending
+    || !currentRecipientKeyData || currentRecipientKeyData.username !== selectedRecipient()
+    || changedContacts.has(selectedRecipient());
+}
 function showAlert(title, message, actions = []) {
-  if (!securityAlert) return;
-  alertTitle.textContent = title;
-  alertMessage.textContent = message;
-
-  // Clear previous actions
-  alertActions.replaceChildren();
-
-  actions.forEach((act) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = act.className || "btn btn--primary btn--small";
-    btn.textContent = act.label;
-    btn.addEventListener("click", act.onClick);
-    alertActions.appendChild(btn);
-  });
-
-  securityAlert.classList.remove("is-hidden");
+  element("alert-title").textContent = title;
+  element("alert-message").textContent = message;
+  element("alert-actions").replaceChildren();
+  for (const action of actions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn btn--primary btn--small";
+    button.textContent = action.label;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try { await action.onClick(); }
+      catch { setStatus("Could not complete key setup or trust update. Retry or reload.", "error"); }
+      finally { button.disabled = false; }
+    });
+    element("alert-actions").appendChild(button);
+  }
+  element("security-alert").classList.remove("is-hidden");
 }
-
 function hideAlert() {
-  if (!securityAlert) return;
-  securityAlert.classList.add("is-hidden");
-  alertActions.replaceChildren();
+  element("security-alert").classList.add("is-hidden");
+  element("alert-actions").replaceChildren();
 }
-
-function appendMessage(sender, text, isSelf) {
-  if (!messagesList) return;
-
+function appendMessage(sender, text, isSelf = false) {
   const item = document.createElement("div");
-  item.className = `message-item ${isSelf ? "message-item--outgoing" : "message-item--incoming"}`;
-
+  item.className = `message-item message-item--${isSelf ? "outgoing" : "incoming"}`;
   const header = document.createElement("div");
   header.className = "message-header";
-
-  const senderSpan = document.createElement("span");
-  senderSpan.className = "message-sender";
-  senderSpan.textContent = isSelf ? "You" : sender;
-  header.appendChild(senderSpan);
-
+  const name = document.createElement("span");
+  name.className = "message-sender";
+  name.textContent = isSelf ? "You" : sender;
+  header.appendChild(name);
   const body = document.createElement("div");
   body.className = "message-body";
-  body.textContent = text; // SECURITY: textContent prevents HTML injection / XSS
-
-  item.appendChild(header);
-  item.appendChild(body);
-  messagesList.appendChild(item);
-
-  messagesList.scrollTop = messagesList.scrollHeight;
+  // SECURITY: user-supplied text is never parsed as markup.
+  body.textContent = text;
+  item.append(header, body);
+  const messages = element("messages-list");
+  messages.appendChild(item);
+  messages.scrollTop = messages.scrollHeight;
 }
-
-// ---------------------------------------------------------------------------
-// Identity Initialization & Key Management (Step 5)
-// ---------------------------------------------------------------------------
-
-async function createAndUploadIdentity(isReset = false) {
-  setStatus("Generating cryptographic identity...", "info");
-  const { ecdh, ecdsa } = await generateIdentity();
-
-  const ecdhJwk = await exportPublicJwk(ecdh.publicKey);
-  const ecdsaJwk = await exportPublicJwk(ecdsa.publicKey);
-  const fp = await fingerprint(ecdh.publicKey, ecdsa.publicKey);
-
-  const identityData = {
-    username: currentUsername,
-    ecdhPrivateKey: ecdh.privateKey,
-    ecdhPublicKey: ecdh.publicKey,
-    ecdsaPrivateKey: ecdsa.privateKey,
-    ecdsaPublicKey: ecdsa.publicKey,
-    ecdhJwk,
-    ecdsaJwk,
-    fingerprint: fp,
+function identityKeyPairs(identity) {
+  return {
+    ecdh: { privateKey: identity.ecdhPrivateKey, publicKey: identity.ecdhPublicKey },
+    ecdsa: { privateKey: identity.ecdsaPrivateKey, publicKey: identity.ecdsaPublicKey },
   };
-
-  // Upload normalized public keys to server
-  const endpoint = "/api/keys";
-  const method = isReset ? "PUT" : "POST";
-
-  const res = await fetch(endpoint, {
-    method: method,
-    headers: {
-      "Content-Type": "application/json",
-      "X-CSRFToken": CSRF_TOKEN,
-    },
-    body: JSON.stringify({
-      ecdh_jwk: ecdhJwk,
-      ecdsa_jwk: ecdsaJwk,
-    }),
+}
+async function fetchKeys(username) {
+  const response = await fetch(`/api/users/${encodeURIComponent(username)}/keys`);
+  if (!response.ok) throw new Error("public keys unavailable");
+  const keys = await response.json();
+  if (keys.username !== username) throw new Error("key directory username mismatch");
+  return { ...keys, fingerprint: await fingerprintFromJwks(keys.ecdh_jwk, keys.ecdsa_jwk) };
+}
+async function publishIdentity(identity, reset = false) {
+  const response = await fetch("/api/keys", {
+    method: reset ? "PUT" : "POST",
+    headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+    body: JSON.stringify({ ecdh_jwk: identity.ecdhJwk, ecdsa_jwk: identity.ecdsaJwk }),
   });
-
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.error || `Failed to upload keys (HTTP ${res.status})`);
+  // SECURITY: reconcile a competing POST only if the public identity matches.
+  if (!response.ok && (response.status !== 409
+    || (await fetchKeys(currentUsername)).fingerprint !== identity.fingerprint)) {
+    throw new Error("Public key upload failed; reload to retry safely");
   }
-
-  // Persist non-extractable keys in IndexedDB only after server upload succeeds
-  await saveIdentity(identityData);
-  localIdentity = identityData;
-
-  if (myFingerprintElem) {
-    myFingerprintElem.textContent = fp;
-  }
+}
+function activateIdentity(identity) {
+  localIdentity = identity;
+  element("my-fingerprint").textContent = identity.fingerprint;
   hideAlert();
-  setStatus("Identity keys ready", "success");
+  if (!socket.connected) socket.connect();
+  updateSendButton();
 }
-
-async function initIdentity() {
-  if (!currentUsername) return;
-
-  try {
-    // 1. Check server status
-    const meRes = await fetch("/api/me");
-    if (!meRes.ok) throw new Error("Failed to check user key status");
-    const meData = await meRes.json();
-
-    // 2. Check local IndexedDB store
-    const local = await getIdentity(currentUsername);
-
-    if (local) {
-      localIdentity = local;
-      if (myFingerprintElem) {
-        myFingerprintElem.textContent = local.fingerprint;
-      }
-    } else if (!meData.has_keys) {
-      // First login: generate and POST /api/keys
-      await createAndUploadIdentity(false);
-    } else {
-      // Local keys missing, but server has keys: warn user and offer reset
-      if (myFingerprintElem) {
-        myFingerprintElem.textContent = "KEYS MISSING";
-      }
-      showAlert(
-        "Identity Keys Missing",
-        "Your cryptographic keys were not found on this device. Any unread messages cannot be decrypted. You can reset your keys to generate a new pair.",
-        [
-          {
-            label: "Reset Keys",
-            className: "btn btn--primary btn--small",
-            onClick: async () => {
-              try {
-                await createAndUploadIdentity(true);
-              } catch (err) {
-                showAlert("Key Reset Failed", err.message);
-              }
-            },
-          },
-        ]
-      );
+async function createAndUploadIdentity(reset = false) {
+  localIdentity = null;
+  socket.disconnect();
+  updateSendButton();
+  setStatus("Generating identity keys...");
+  const { ecdh, ecdsa } = await generateIdentity();
+  const identity = {
+    username: currentUsername,
+    ecdhPrivateKey: ecdh.privateKey, ecdhPublicKey: ecdh.publicKey,
+    ecdsaPrivateKey: ecdsa.privateKey, ecdsaPublicKey: ecdsa.publicKey,
+    ecdhJwk: await exportPublicJwk(ecdh.publicKey), ecdsaJwk: await exportPublicJwk(ecdsa.publicKey),
+    fingerprint: await fingerprint(ecdh.publicKey, ecdsa.publicKey),
+  };
+  // SECURITY: commit private keys before publishing their public halves.
+  await saveIdentity(identity);
+  await publishIdentity(identity, reset);
+  activateIdentity(identity);
+}
+function showIdentityWarning(title, message) {
+  localIdentity = null;
+  socket.disconnect();
+  element("my-fingerprint").textContent = "KEYS MISSING";
+  updateSendButton();
+  showAlert(title, message, [{ label: "Reset keys", onClick: async () => {
+    try { await createAndUploadIdentity(true); }
+    catch {
+      showAlert("Key setup incomplete", "Your saved keys have been retained. Reload to check the server and retry safely.", [
+        { label: "Retry key setup", onClick: initIdentity },
+      ]);
     }
-  } catch (err) {
-    setStatus(`Identity error: ${err.message}`, "error");
+  } }]);
+}
+async function initIdentity() {
+  if (settingUpIdentity) return;
+  settingUpIdentity = true;
+  const initialize = async () => {
+    const response = await fetch("/api/me");
+    if (!response.ok) throw new Error("Sign in again to initialize your keys");
+    const me = await response.json();
+    if (me.username !== currentUsername) throw new Error("Your account changed; reload this page");
+    const identity = await getIdentity(currentUsername);
+    if (identity) {
+      if (!me.has_keys) await publishIdentity(identity);
+      else if ((await fetchKeys(currentUsername)).fingerprint !== identity.fingerprint) {
+        showIdentityWarning("Identity Keys Changed", "This browser's keys differ from your published keys. Use the browser holding the current keys, or explicitly reset them. Resetting cannot recover older messages.");
+        return;
+      }
+      activateIdentity(identity);
+    } else if (!me.has_keys) await createAndUploadIdentity();
+    else showIdentityWarning("Identity Keys Missing", "The private keys on this browser are missing. Old or queued messages encrypted to the lost keys cannot be recovered. Reset keys explicitly to receive new messages.");
+  };
+  try {
+    // SECURITY: serialize first-time generation across tabs on this origin.
+    if (navigator.locks) await navigator.locks.request(`identity:${currentUsername}`, initialize);
+    else await initialize();
+  } catch (error) {
+    localIdentity = null;
+    socket.disconnect();
+    setStatus(error.message, "error");
+    showAlert("Key setup incomplete", "Keys already saved on this browser are retained. Retry after checking your connection.", [
+      { label: "Retry key setup", onClick: initIdentity },
+    ]);
+  } finally { settingUpIdentity = false; updateSendButton(); }
+}
+function showKeyChange(username, stored, live) {
+  const change = { stored, live };
+  changedContacts.set(username, change);
+  updateSendButton();
+  showAlert("SECURITY WARNING: Key Changed!",
+    `Review ${username}'s key before continuing. Stored: ${stored.fingerprint}. Received: ${live.fingerprint}. Compare fingerprints through a separate trusted channel.`, [{
+      label: "Trust new key", onClick: async () => {
+        // SECURITY: an old warning cannot approve a newer replacement key.
+        const latest = await fetchKeys(username);
+        if (latest.fingerprint !== live.fingerprint) { showKeyChange(username, stored, latest); return; }
+        await saveContact({ owner: currentUsername, username, ecdhJwk: live.ecdh_jwk,
+          ecdsaJwk: live.ecdsa_jwk, fingerprint: live.fingerprint });
+        // Concurrent receive/send checks may recreate this same warning. The
+        // explicit click approves this fingerprint, regardless of warning object.
+        if (changedContacts.get(username)?.live.fingerprint === live.fingerprint) {
+          changedContacts.delete(username);
+        }
+        hideAlert();
+        if (selectedRecipient() === username) await checkContactKeys(username);
+        setStatus("New key trusted. Ask the sender to resend any rejected message.", "success");
+        updateSendButton();
+      },
+    }]);
+}
+async function trustContact(username, live) {
+  const stored = await getContact(username, currentUsername);
+  if (stored && (stored.needsReview || stored.fingerprint !== live.fingerprint)) {
+    showKeyChange(username, stored, live);
+    return false;
+  }
+  if (!stored) await saveContact({ owner: currentUsername, username,
+    ecdhJwk: live.ecdh_jwk, ecdsaJwk: live.ecdsa_jwk, fingerprint: live.fingerprint });
+  return !changedContacts.has(username);
+}
+async function checkContactKeys(username) {
+  const request = ++contactRequest;
+  currentRecipientKeyData = null;
+  checkingContact = true;
+  updateSendButton();
+  try {
+    if (!/^[a-z0-9_]{3,32}$/.test(username)) return null;
+    const live = await fetchKeys(username);
+    // SECURITY: discard responses for obsolete selections before trusting them.
+    if (request !== contactRequest || selectedRecipient() !== username) return null;
+    if (!(await trustContact(username, live))) return null;
+    if (request !== contactRequest || selectedRecipient() !== username) return null;
+    currentRecipientKeyData = live;
+    element("contact-fingerprint").textContent = live.fingerprint;
+    element("contact-security-bar").classList.remove("is-hidden");
+    return live;
+  } catch {
+    if (request === contactRequest) setStatus("Could not verify this contact's public keys. Retry before sending.", "error");
+    return null;
+  } finally {
+    if (request === contactRequest) checkingContact = false;
+    updateSendButton();
   }
 }
-
-// ---------------------------------------------------------------------------
-// Contact Verification & TOFU (Trust On First Use)
-// ---------------------------------------------------------------------------
-
-async function checkContactKeys(recipient) {
-  if (!recipient || recipient.length < 3) {
-    if (contactSecurityBar) contactSecurityBar.classList.add("is-hidden");
-    currentRecipientKeyData = null;
-    isSendingBlocked = false;
-    if (sendBtn) sendBtn.disabled = false;
-    hideAlert();
+recipientInput.addEventListener("input", () => {
+  clearTimeout(recipientTimer);
+  ++contactRequest;
+  checkingContact = false;
+  currentRecipientKeyData = null;
+  element("contact-security-bar").classList.add("is-hidden");
+  updateSendButton();
+  if (localIdentity) recipientTimer = setTimeout(() => checkContactKeys(selectedRecipient()), 300);
+});
+socket.on("connect", () => { setStatus("Connected to chat server", "success"); updateSendButton(); });
+socket.on("disconnect", () => { setStatus("Disconnected from chat server", "error"); updateSendButton(); });
+socket.on("connect_error", () => { setStatus("Connection failed. Check HTTPS and sign in again.", "error"); updateSendButton(); });
+async function handleIncoming(payload) {
+  if (!localIdentity) throw new Error("local identity unavailable");
+  const env = assertTextEnvelope(payload);
+  if (env.recipient !== currentUsername) throw new Error("not for this user");
+  // SECURITY: TOFU, signature, timestamp, replay, decrypt, render, record seen.
+  const keys = await fetchKeys(env.sender);
+  if (!(await trustContact(env.sender, keys))) throw new Error("sender key requires explicit trust");
+  await verifyTextSignature(env, await importPeerEcdsa(keys.ecdsa_jwk));
+  assertTimestamp(env.ts);
+  const hash = `${currentUsername}:${await signatureHash(env.sig)}`;
+  if (await hasSeenSignature(hash)) throw new Error("replayed message");
+  const text = await decryptText({ ownEcdhPrivateKey: localIdentity.ecdhPrivateKey, env });
+  appendMessage(env.sender, text);
+  await markSignatureSeen(hash);
+}
+socket.on("message", (payload) => {
+  // SECURITY: serialize deliveries so duplicates cannot race within this tab.
+  incomingQueue = incomingQueue.then(async () => {
+    try { await handleIncoming(payload); }
+    catch (error) {
+      const reasons = new Set(["replayed message", "message too old", "timestamp in the future",
+        "bad signature", "not for this user", "sender key requires explicit trust"]);
+      setStatus(`Message rejected: ${reasons.has(error.message) ? error.message : "validation or decryption failed"}`, "error");
+    }
+  });
+});
+element("chat-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (sending) return;
+  const recipient = selectedRecipient();
+  const text = messageInput.value;
+  if (!/^[a-z0-9_]{3,32}$/.test(recipient) || !text.trim() || text.length > 2000) {
+    setStatus("Enter a valid recipient and a message of 1–2000 characters.", "error");
     return;
   }
-
-  try {
-    const res = await fetch(`/api/users/${encodeURIComponent(recipient)}/keys`);
-    if (res.status === 404) {
-      if (contactSecurityBar) contactSecurityBar.classList.add("is-hidden");
-      currentRecipientKeyData = null;
-      return;
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const keyData = await res.json();
-    const liveFingerprint = await fingerprintFromJwks(keyData.ecdh_jwk, keyData.ecdsa_jwk);
-
-    // Check stored contact in IndexedDB
-    const stored = await getContact(recipient);
-
-    if (!stored) {
-      // First encounter (TOFU): store and display
-      await saveContact({
-        username: recipient,
-        ecdhJwk: keyData.ecdh_jwk,
-        ecdsaJwk: keyData.ecdsa_jwk,
-        fingerprint: liveFingerprint,
-      });
-
-      if (contactFingerprintElem) contactFingerprintElem.textContent = liveFingerprint;
-      if (contactSecurityBar) contactSecurityBar.classList.remove("is-hidden");
-      isSendingBlocked = false;
-      if (sendBtn) sendBtn.disabled = false;
-      hideAlert();
-    } else if (stored.fingerprint === liveFingerprint) {
-      // Fingerprint matches stored key
-      if (contactFingerprintElem) contactFingerprintElem.textContent = liveFingerprint;
-      if (contactSecurityBar) contactSecurityBar.classList.remove("is-hidden");
-      isSendingBlocked = false;
-      if (sendBtn) sendBtn.disabled = false;
-      hideAlert();
-    } else {
-      // SECURITY WARNING: Fingerprint mismatch!
-      isSendingBlocked = true;
-      if (sendBtn) sendBtn.disabled = true;
-
-      if (contactFingerprintElem) {
-        contactFingerprintElem.textContent = `${liveFingerprint} (CHANGED!)`;
-      }
-      if (contactSecurityBar) contactSecurityBar.classList.remove("is-hidden");
-
-      showAlert(
-        "⚠️ SECURITY WARNING: Key Changed!",
-        `The cryptographic fingerprint for ${recipient} has changed!\nStored: ${stored.fingerprint}\nReceived: ${liveFingerprint}\nThis could indicate a key reset or a potential security risk.`,
-        [
-          {
-            label: "Trust New Key",
-            className: "btn btn--primary btn--small",
-            onClick: async () => {
-              await saveContact({
-                username: recipient,
-                ecdhJwk: keyData.ecdh_jwk,
-                ecdsaJwk: keyData.ecdsa_jwk,
-                fingerprint: liveFingerprint,
-              });
-              isSendingBlocked = false;
-              if (sendBtn) sendBtn.disabled = false;
-              hideAlert();
-              if (contactFingerprintElem) contactFingerprintElem.textContent = liveFingerprint;
-              setStatus("New key trusted", "success");
-            },
-          },
-        ]
-      );
-    }
-
-    currentRecipientKeyData = { ...keyData, fingerprint: liveFingerprint };
-  } catch (err) {
-    setStatus(`Could not verify contact keys: ${err.message}`, "error");
+  if (!localIdentity || !socket.connected) {
+    setStatus("Wait for identity setup and a connection before sending.", "error");
+    return;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Event Listeners
-// ---------------------------------------------------------------------------
-
-let recipientDebounceTimer = null;
-if (recipientInput) {
-  recipientInput.addEventListener("input", () => {
-    clearTimeout(recipientDebounceTimer);
-    const val = recipientInput.value.trim().toLowerCase();
-    recipientDebounceTimer = setTimeout(() => {
-      checkContactKeys(val);
-    }, 300);
-  });
-}
-
-socket.on("connect", () => {
-  setStatus("Connected to chat server", "success");
-});
-
-socket.on("disconnect", () => {
-  setStatus("Disconnected from chat server", "error");
-});
-
-socket.on("connect_error", (err) => {
-  setStatus(`Connection error: ${err.message || "Failed to connect"}`, "error");
-});
-
-// Incoming message handler (TEMP-PLAINTEXT until Step 6)
-socket.on("message", (payload) => {
-  if (!payload || typeof payload !== "object") return;
-  const sender = typeof payload.sender === "string" ? payload.sender : "Unknown";
-  const text = typeof payload.text === "string" ? payload.text : "";
-  appendMessage(sender, text, false);
-});
-
-// Form Submission
-if (chatForm) {
-  chatForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-
-    if (isSendingBlocked) {
-      setStatus("Sending blocked due to untrusted contact key change", "error");
+  sending = true;
+  updateSendButton();
+  try {
+    clearTimeout(recipientTimer);
+    // SECURITY: recheck the contact on each send to catch resets without typing.
+    const keys = await checkContactKeys(recipient);
+    if (!keys || selectedRecipient() !== recipient || changedContacts.has(recipient)) return;
+    const identity = localIdentity;
+    setStatus("Encrypting...");
+    const envelope = await encryptText({ ownIdentity: identityKeyPairs(identity),
+      recipientEcdhJwk: keys.ecdh_jwk, sender: currentUsername, recipient, text });
+    if (selectedRecipient() !== recipient || localIdentity !== identity
+      || currentRecipientKeyData !== keys || changedContacts.has(recipient)) return;
+    const ack = await new Promise((resolve, reject) => {
+      socket.timeout(10000).emit("send_message", envelope, (error, response) => {
+        if (error) reject(new Error("send timed out")); else resolve(response);
+      });
+    });
+    if (!ack?.ok) {
+      const reasons = new Set(["recipient offline", "recipient not found", "message too large", "unauthorized"]);
+      setStatus(`Message not sent: ${reasons.has(ack?.error) ? ack.error : "server rejected the envelope"}`, "error");
       return;
     }
-
-    const recipient = recipientInput ? recipientInput.value.trim().toLowerCase() : "";
-    const text = messageInput ? messageInput.value : "";
-
-    if (!recipient) {
-      setStatus("Please specify a recipient username", "error");
-      if (recipientInput) recipientInput.focus();
-      return;
-    }
-
-    if (!text.trim()) {
-      setStatus("Message cannot be empty", "error");
-      if (messageInput) messageInput.focus();
-      return;
-    }
-
-    if (text.length > 2000) {
-      setStatus("Message exceeds 2000 characters", "error");
-      return;
-    }
-
-    if (sendBtn) sendBtn.disabled = true;
-    setStatus("Sending...", "info");
-
-    // TEMP-PLAINTEXT: emit unencrypted payload; Step 6 replaces with ciphertext envelope.
-    socket.emit(
-      "send_message",
-      {
-        recipient: recipient,
-        text: text, // TEMP-PLAINTEXT
-      },
-      (ack) => {
-        if (sendBtn && !isSendingBlocked) sendBtn.disabled = false;
-
-        if (ack && ack.ok) {
-          appendMessage(currentUsername, text, true);
-          setStatus("Message delivered", "success");
-          if (messageInput) {
-            messageInput.value = "";
-            messageInput.focus();
-          }
-        } else {
-          const errorMsg = ack && ack.error ? ack.error : "Failed to deliver message";
-          setStatus(`Error: ${errorMsg}`, "error");
-        }
-      }
-    );
-  });
-}
-
-// Initialize identity when DOM is ready
+    appendMessage(currentUsername, text, true);
+    setStatus("Message sent", "success");
+    if (messageInput.value === text) messageInput.value = "";
+    messageInput.focus();
+  } catch { setStatus("Could not confirm sending. Check your connection before retrying.", "error"); }
+  finally { sending = false; updateSendButton(); }
+});
+// Browser console acceptance check: console.table(await e2ee.selfTest()).
+window.e2ee = { socket, selfTest: async (options = {}) => {
+  const identity = localIdentity || (await getIdentity(currentUsername));
+  return selfTest({ identity: identity ? identityKeyPairs(identity) : undefined, ...options });
+} };
+updateSendButton();
 initIdentity();

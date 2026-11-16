@@ -200,6 +200,9 @@ def logout() -> str:
     plain <img> or <a> tag.  Flask-WTF CSRFProtect rejects requests that lack a
     valid CSRF token.
     """
+    from events import disconnect_user  # deferred to avoid import cycles
+
+    disconnect_user(current_user.id)
     logout_user()
     flash("You have been logged out.", "success")
     return redirect(url_for("auth.login"))
