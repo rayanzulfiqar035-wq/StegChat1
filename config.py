@@ -103,3 +103,24 @@ class Config:
                 "SECRET_KEY is too short (minimum 32 characters). Generate a strong one with:\n"
                 '  python -c "import secrets; print(secrets.token_hex(32))"'
             )
+
+        cert_path = Path(cls.SSL_CERT)
+        if not cert_path.is_absolute():
+            cert_path = BASE_DIR / cert_path
+
+        key_path = Path(cls.SSL_KEY)
+        if not key_path.is_absolute():
+            key_path = BASE_DIR / key_path
+
+        if not cert_path.is_file() or not key_path.is_file():
+            missing = []
+            if not cert_path.is_file():
+                missing.append(str(cert_path))
+            if not key_path.is_file():
+                missing.append(str(key_path))
+            raise ConfigError(
+                f"Missing SSL certificate file(s): {', '.join(missing)}.\n"
+                "Generate them using mkcert:\n"
+                "  mkcert -install\n"
+                "  mkcert -cert-file certs/localhost.pem -key-file certs/localhost-key.pem localhost 127.0.0.1 ::1"
+            )

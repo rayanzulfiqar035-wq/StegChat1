@@ -8,6 +8,7 @@ touching this wiring.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from flask import Flask, render_template
 
@@ -83,19 +84,29 @@ def _register_routes(app: Flask) -> None:
 
 
 def main() -> int:
-    """Start the development server on the loopback interface only."""
+    """Start the development server on the loopback interface only over HTTPS."""
     try:
         app = create_app()
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1
 
-    # SECURITY: bound to 127.0.0.1 so the development server is never reachable
-    # from the local network.
+    base_dir = Path(__file__).resolve().parent
+    cert_path = Path(app.config["SSL_CERT"])
+    if not cert_path.is_absolute():
+        cert_path = base_dir / cert_path
+
+    key_path = Path(app.config["SSL_KEY"])
+    if not key_path.is_absolute():
+        key_path = base_dir / key_path
+
+    # SECURITY: bound to 127.0.0.1 and HTTPS only so plain-HTTP traffic is rejected
+    # and development server is never reachable from the local network.
     socketio.run(
         app,
         host="127.0.0.1",
         port=5000,
+        ssl_context=(str(cert_path), str(key_path)),
         allow_unsafe_werkzeug=True,
         debug=False,
         use_reloader=False,
