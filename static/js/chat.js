@@ -119,7 +119,18 @@ function identityKeyPairs(identity) {
 }
 async function fetchKeys(username) {
   const response = await fetch(`/api/users/${encodeURIComponent(username)}/keys`);
-  if (!response.ok) throw new Error("public keys unavailable");
+  if (!response.ok) {
+    let code = "lookup_failed";
+    if (response.status === 401) code = "session_expired";
+    else if (response.status === 429) code = "lookup_limited";
+    else if (response.status === 404) {
+      const body = await response.json().catch(() => ({}));
+      code = body.error === "user has no public keys" ? "keys_missing" : "user_missing";
+    }
+    const error = new Error("public keys unavailable");
+    error.code = code;
+    throw error;
+  }
   const keys = await response.json();
   if (keys.username !== username) throw new Error("key directory username mismatch");
   return { ...keys, fingerprint: await fingerprintFromJwks(keys.ecdh_jwk, keys.ecdsa_jwk) };
@@ -254,11 +265,28 @@ async function checkContactKeys(username) {
     if (!(await trustContact(username, live))) return null;
     if (request !== contactRequest || selectedRecipient() !== username) return null;
     currentRecipientKeyData = live;
+    if (element("alert-title").textContent === "Contact keys unavailable") hideAlert();
     element("contact-fingerprint").textContent = live.fingerprint;
     element("contact-security-bar").classList.remove("is-hidden");
     return live;
-  } catch {
-    if (request === contactRequest) setStatus("Could not verify this contact's public keys. Retry before sending.", "error");
+  } catch (error) {
+    if (request === contactRequest && selectedRecipient() === username) {
+      // SECURITY: use fixed explanations, never reflect arbitrary error bodies.
+      const messages = {
+        keys_missing: "This contact has not set up their encryption keys. Ask them to sign in and open Chat, then retry here.",
+        user_missing: "No account has that username. Check the exact recipient username.",
+        session_expired: "Your session has expired. Sign in again to look up contact keys.",
+        lookup_limited: "Too many public-key lookups. Wait a minute, then retry.",
+      };
+      const message = messages[error.code] || "Could not verify this contact's public keys. Check your connection and retry.";
+      setStatus(message, "error");
+      showAlert("Contact keys unavailable", message, [{
+        label: "Retry contact lookup",
+        onClick: async () => {
+          if (await checkContactKeys(selectedRecipient())) hideAlert();
+        },
+      }]);
+    }
     return null;
   } finally {
     if (request === contactRequest) checkingContact = false;

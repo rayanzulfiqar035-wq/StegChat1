@@ -211,6 +211,36 @@ try {
     return evaluate(page, "window.__lastEnvelope");
   }
   const contains = (text) => `Array.from(document.querySelectorAll('.message-item--incoming .message-body')).some(x=>x.textContent===${JSON.stringify(text)})`;
+  const keyless = await page();
+  await navigate(keyless, '/register');
+  await evaluate(keyless, `(async()=>{
+    const csrf=document.querySelector('meta[name="csrf-token"]').content;
+    await fetch('/register',{method:'POST',body:new URLSearchParams({username:'keyless',password:'browser-test-password-123',confirm:'browser-test-password-123',csrf_token:csrf})});
+  })()`);
+  await evaluate(alice, "document.getElementById('recipient-input').value='keyless';document.getElementById('recipient-input').dispatchEvent(new Event('input'))");
+  await wait(alice, "document.getElementById('chat-status').textContent.includes('has not set up')");
+  check('registered contact without keys explains first-login setup and blocks send', await evaluate(alice, "document.getElementById('send-btn').disabled && document.querySelector('#alert-actions button').textContent==='Retry contact lookup'"));
+  await evaluate(keyless, `(async()=>{
+    const csrf=document.querySelector('meta[name="csrf-token"]').content;
+    await fetch('/login',{method:'POST',body:new URLSearchParams({username:'keyless',password:'browser-test-password-123',csrf_token:csrf})});
+  })()`);
+  await navigate(keyless, '/chat'); await wait(keyless, identityReady);
+  await evaluate(alice, "document.querySelector('#alert-actions button').click()");
+  await wait(alice, "!document.getElementById('send-btn').disabled");
+  check('retry succeeds after contact opens Chat without resetting any identity', await evaluate(alice, "document.getElementById('security-alert').classList.contains('is-hidden')"));
+  await evaluate(alice, "document.getElementById('recipient-input').value='not_registered';document.getElementById('recipient-input').dispatchEvent(new Event('input'))");
+  await wait(alice, "document.getElementById('chat-status').textContent.includes('No account has')");
+  check('unknown usernames get a distinct actionable explanation', await evaluate(alice, "document.getElementById('send-btn').disabled"));
+  for (const [status, explanation] of [[401,'session has expired'],[429,'Wait a minute']]) {
+    await evaluate(alice, `{
+      window.__lookupFetch=window.fetch;
+      window.fetch=function(url,options){if(url==='/api/users/bob/keys')return Promise.resolve(new Response('{}',{status:${status}}));return window.__lookupFetch.call(this,url,options);};
+      document.getElementById('recipient-input').value='bob';document.getElementById('recipient-input').dispatchEvent(new Event('input'));
+    }`);
+    await wait(alice, `document.getElementById('chat-status').textContent.includes(${JSON.stringify(explanation)})`);
+    check(`HTTP ${status} lookup failure gets a clear explanation`, await evaluate(alice, "document.getElementById('send-btn').disabled"));
+    await evaluate(alice, 'window.fetch=window.__lookupFetch;void 0');
+  }
   await select(alice, "bob");
   check("contact trust saved under the same account-scoped lookup key", await evaluate(alice, "(async()=>{const k=await import('/static/js/keystore.js');return !!(await k.getContact('bob','alice'));})()"));
   const text = "<script>alert(1)</script> encrypted browser test";
