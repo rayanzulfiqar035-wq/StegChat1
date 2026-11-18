@@ -12,6 +12,8 @@
  * - A fresh ephemeral key pair and a fresh IV are created per message (§8).
  */
 
+import { embed, extract } from "./stego.js";
+
 const CURVE = "P-256";
 
 // §8 KDF labels: never reuse one derived value for two purposes.
@@ -263,15 +265,20 @@ function jwkFromRawB64(rawB64) {
  * @returns {Promise<CryptoKey>}
  */
 async function deriveAesKey(privateKey, publicKey, label) {
+  return derivePurposeAes(await deriveHkdfKey(privateKey, publicKey), label);
+}
+
+async function deriveHkdfKey(privateKey, publicKey) {
   // Raw ECDH output is never used as a key directly (§8).
   const sharedBits = await window.crypto.subtle.deriveBits(
     { name: "ECDH", public: publicKey },
     privateKey,
     ECDH_BITS
   );
-  const hkdfKey = await window.crypto.subtle.importKey("raw", sharedBits, "HKDF", false, [
-    "deriveKey",
-  ]);
+  return window.crypto.subtle.importKey("raw", sharedBits, "HKDF", false, ["deriveKey", "deriveBits"]);
+}
+
+async function derivePurposeAes(hkdfKey, label) {
   // SECURITY: HKDF with a fixed salt, a purpose label and SHA-256 separates the
   // encryption key from the raw shared secret, so the ECDH output itself is
   // never usable as a key (prevents related-key attacks and key reuse).
@@ -282,6 +289,17 @@ async function deriveAesKey(privateKey, publicKey, label) {
     false,
     ["encrypt", "decrypt"]
   );
+}
+
+async function deriveStegoKeys(privateKey, publicKey) {
+  const shared = await deriveHkdfKey(privateKey, publicKey);
+  // SECURITY: derive independent purposes from the same ECDH secret. The raw
+  // positions key stays in browser memory and is never sent with the envelope.
+  return {
+    aesKey: await derivePurposeAes(shared, KDF_LABEL_TEXT),
+    stegoKey: new Uint8Array(await crypto.subtle.deriveBits(
+      { ...HKDF_PARAMS, info: utf8("stego-positions") }, shared, 256)),
+  };
 }
 
 /**
@@ -405,6 +423,29 @@ export async function encryptText({ ownIdentity, recipientEcdhJwk, sender, recip
   return { ...env, sig: toB64(signature) };
 }
 
+export async function encryptStego({ ownIdentity, recipientEcdhJwk, sender, recipient, text,
+  coverBlob, maxStegoBytes = 3145728 }) {
+  const ephemeral = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: CURVE }, false, ["deriveBits"]);
+  const { aesKey, stegoKey } = await deriveStegoKeys(ephemeral.privateKey, await importPeerEcdh(recipientEcdhJwk));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const env = { v: 1, kind: "stego", sender, recipient, ts: Date.now(),
+    eph: toB64(await exportRaw(ephemeral.publicKey)) };
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv,
+    tagLength: 128, additionalData: additionalData("stego", sender, recipient, env.ts) }, aesKey, utf8(text)));
+  const payload = new Uint8Array(iv.length + ciphertext.length);
+  payload.set(iv); payload.set(ciphertext, iv.length);
+  let image;
+  try { image = await embed(coverBlob, payload, stegoKey); }
+  finally { stegoKey.fill(0); }
+  if (image.blob.size > maxStegoBytes) throw new Error("image too large");
+  const png = new Uint8Array(await image.blob.arrayBuffer());
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" },
+    ownIdentity.ecdsa.privateKey, stegoSigningBytes(env, await sha256Hex(png)));
+  return { envelope: { ...env, img: toB64(png), sig: toB64(signature) },
+    usedFraction: image.usedFraction, warning: image.warning, changedChannels: image.changedChannels };
+}
+
 // ---------------------------------------------------------------------------
 // Verify + decrypt
 // ---------------------------------------------------------------------------
@@ -416,12 +457,17 @@ export async function encryptText({ ownIdentity, recipientEcdhJwk, sender, recip
  * @returns {object}
  */
 export function assertTextEnvelope(env) {
+  if (env?.kind !== "text") throw new Error("unsupported kind");
+  return assertMessageEnvelope(env);
+}
+
+export function assertMessageEnvelope(env) {
   if (!env || typeof env !== "object" || Array.isArray(env)) {
     throw new Error("invalid envelope");
   }
   if (env.v !== PROTOCOL_VERSION) throw new Error("unsupported version");
-  if (env.kind !== "text") throw new Error("unsupported kind");
-  for (const field of ["sender", "recipient", "eph", "iv", "ct", "sig"]) {
+  if (!["text", "stego"].includes(env.kind)) throw new Error("unsupported kind");
+  for (const field of ["sender", "recipient", "eph", "sig", ...(env.kind === "text" ? ["iv", "ct"] : ["img"])]) {
     if (typeof env[field] !== "string" || env[field].length === 0) {
       throw new Error("invalid envelope");
     }
@@ -435,8 +481,13 @@ export function assertTextEnvelope(env) {
   // Reject non-canonical base64 early (cheap, before any crypto work).
   const ephemeral = fromB64(env.eph);
   if (ephemeral.length !== 65 || ephemeral[0] !== 0x04) throw new Error("invalid ephemeral key");
-  if (fromB64(env.iv).length !== 12) throw new Error("invalid iv");
-  if (fromB64(env.ct).length < 16) throw new Error("invalid ciphertext");
+  if (env.kind === "text") {
+    if (fromB64(env.iv).length !== 12) throw new Error("invalid iv");
+    if (fromB64(env.ct).length < 16) throw new Error("invalid ciphertext");
+  } else {
+    const png = fromB64(env.img);
+    if (![137,80,78,71,13,10,26,10].every((b, i) => png[i] === b)) throw new Error("invalid PNG");
+  }
   if (fromB64(env.sig).length !== 64) throw new Error("invalid signature");
   return env;
 }
@@ -456,6 +507,15 @@ export async function verifyTextSignature(env, senderEcdsaPub) {
     fromB64(env.sig),
     textSigningBytes(env)
   );
+  if (!ok) throw new Error("bad signature");
+}
+
+export async function verifyMessageSignature(env, senderEcdsaPub) {
+  if (env.kind === "text") return verifyTextSignature(env, senderEcdsaPub);
+  // SECURITY: authenticate every PNG byte before Canvas decoding/extraction.
+  const hash = await sha256Hex(fromB64(env.img));
+  const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, senderEcdsaPub,
+    fromB64(env.sig), stegoSigningBytes(env, hash));
   if (!ok) throw new Error("bad signature");
 }
 
@@ -506,6 +566,19 @@ export async function decryptText({ ownEcdhPrivateKey, env }) {
     fromB64(env.ct)
   );
   return new TextDecoder().decode(plainBuf);
+}
+
+export async function decryptStego({ ownEcdhPrivateKey, env }) {
+  const { aesKey, stegoKey } = await deriveStegoKeys(ownEcdhPrivateKey,
+    await importPeerEcdh(jwkFromRawB64(env.eph)));
+  let payload;
+  try { payload = await extract(new Blob([fromB64(env.img)], { type: "image/png" }), stegoKey); }
+  finally { stegoKey.fill(0); }
+  if (payload.length < 28) throw new Error("invalid encrypted payload");
+  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: payload.slice(0, 12),
+    tagLength: 128, additionalData: additionalData("stego", env.sender, env.recipient, env.ts) },
+    aesKey, payload.slice(12));
+  return new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
 }
 
 // ---------------------------------------------------------------------------

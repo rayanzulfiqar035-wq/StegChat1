@@ -1,9 +1,10 @@
-/** Step 6 chat: browser-only keys, explicit contact trust, signed ciphertext. */
+/** Encrypted text and PNG chat: browser-only keys and explicit contact trust. */
 import {
   generateIdentity, exportPublicJwk, fingerprint, fingerprintFromJwks,
-  encryptText, assertTextEnvelope, verifyTextSignature, assertTimestamp,
-  signatureHash, decryptText, importPeerEcdsa, selfTest,
+  encryptText, encryptStego, assertMessageEnvelope, verifyMessageSignature, assertTimestamp,
+  signatureHash, decryptText, decryptStego, importPeerEcdsa, selfTest, sha256Hex,
 } from "./crypto.js";
+import { loadImage, usage } from "./stego.js";
 import { getIdentity, saveIdentity, getContact, saveContact, hasSeenSignature, markSignatureSeen } from "./keystore.js";
 
 if (typeof io !== "function") throw new Error("Socket.IO client not loaded");
@@ -13,6 +14,62 @@ const currentUsername = element("current-username").textContent.trim().toLowerCa
 const recipientInput = element("recipient-input");
 const messageInput = element("message-input");
 const sendButton = element("send-btn");
+const coverInput = element("cover-image");
+const maxStegoBytes = Number(document.querySelector(".chat-panel").dataset.maxStegoBytes);
+const usedCovers = new Set();
+let selectedCover = null, coverSize = null, coverLoading = false, coverTooLarge = false;
+let coverRequest = 0;
+
+function updateCoverUsage() {
+  coverTooLarge = false;
+  element("cover-warning").textContent = "";
+  if (coverSize) {
+    try {
+      // Frame usage includes the 12-byte IV, 16-byte GCM tag and 4-byte length.
+      const metrics = usage(new TextEncoder().encode(messageInput.value).length + 28, coverSize.width, coverSize.height);
+      element("cover-usage").textContent = `${(metrics.usedFraction * 100).toFixed(2)}% of image bit capacity will be used.`;
+      if (metrics.warning) element("cover-warning").textContent = "Above 10% capacity: changes may be easier to detect.";
+    } catch {
+      coverTooLarge = true;
+      element("cover-warning").textContent = "Payload exceeds 50% capacity. Choose a larger PNG or shorter text.";
+    }
+  }
+  updateSendButton();
+}
+
+function removeCover() {
+  ++coverRequest;
+  selectedCover = null; coverSize = null; coverLoading = false; coverTooLarge = false;
+  coverInput.value = "";
+  element("cover-usage").textContent = "";
+  element("cover-warning").textContent = "";
+  updateSendButton();
+}
+
+coverInput.addEventListener("change", async () => {
+  const request = ++coverRequest;
+  selectedCover = null; coverSize = null; coverTooLarge = false;
+  element("cover-usage").textContent = "";
+  element("cover-warning").textContent = "";
+  coverLoading = true;
+  updateSendButton();
+  const file = coverInput.files[0];
+  if (!file) { removeCover(); return; }
+  try {
+    const image = await loadImage(file);
+    if (request !== coverRequest) return;
+    selectedCover = file;
+    coverSize = { width: image.width, height: image.height };
+    updateCoverUsage();
+  } catch {
+    if (request === coverRequest) element("cover-warning").textContent = "Choose an opaque PNG, 256–4096 pixels per side.";
+  } finally {
+    if (request === coverRequest) coverLoading = false;
+    updateSendButton();
+  }
+});
+element("remove-cover").addEventListener("click", removeCover);
+messageInput.addEventListener("input", updateCoverUsage);
 const selectedRecipient = () => recipientInput.value.trim().toLowerCase();
 // SECURITY: stay offline until private identity initialization has completed.
 const socket = io({ transports: ["websocket"], autoConnect: false });
@@ -67,6 +124,7 @@ function setStatus(text, type = "info") {
 }
 function updateSendButton() {
   sendButton.disabled = !localIdentity || !socket.connected || checkingContact || sending
+    || coverLoading || coverTooLarge || (coverInput.files.length > 0 && !selectedCover)
     || !currentRecipientKeyData || currentRecipientKeyData.username !== selectedRecipient()
     || changedContacts.has(selectedRecipient());
 }
@@ -93,15 +151,22 @@ function hideAlert() {
   element("security-alert").classList.add("is-hidden");
   element("alert-actions").replaceChildren();
 }
-function appendMessage(sender, text, isSelf = false) {
+function appendMessage(sender, text, isSelf = false, kind = "text") {
   const item = document.createElement("div");
   item.className = `message-item message-item--${isSelf ? "outgoing" : "incoming"}`;
+  item.dataset.kind = kind;
   const header = document.createElement("div");
   header.className = "message-header";
   const name = document.createElement("span");
   name.className = "message-sender";
   name.textContent = isSelf ? "You" : sender;
   header.appendChild(name);
+  if (kind === "stego") {
+    const label = document.createElement("span");
+    label.className = "muted";
+    label.textContent = "Hidden in PNG";
+    header.appendChild(label);
+  }
   const body = document.createElement("div");
   body.className = "message-body";
   // SECURITY: user-supplied text is never parsed as markup.
@@ -308,12 +373,14 @@ socket.on("connect_error", () => { setStatus("Connection failed. Check HTTPS and
 async function handleIncoming(payload) {
   if (!localIdentity) throw new Error("local identity unavailable");
   if (!Number.isSafeInteger(payload?.id) || payload.id <= 0) throw new Error("invalid delivery id");
-  const env = assertTextEnvelope(payload);
+  if (payload?.kind === "stego" && (typeof payload.img !== "string"
+    || payload.img.length > 4 * Math.ceil(maxStegoBytes / 3))) throw new Error("image too large");
+  const env = assertMessageEnvelope(payload);
   if (env.recipient !== currentUsername) throw new Error("not for this user");
   // SECURITY: TOFU, signature, timestamp, replay, decrypt, render, record seen.
   const keys = await fetchKeys(env.sender);
   if (!(await trustContact(env.sender, keys))) throw new Error("sender key requires explicit trust");
-  await verifyTextSignature(env, await importPeerEcdsa(keys.ecdsa_jwk));
+  await verifyMessageSignature(env, await importPeerEcdsa(keys.ecdsa_jwk));
   assertTimestamp(env.ts);
   const hash = `${currentUsername}:${await signatureHash(env.sig)}`;
   if (await hasSeenSignature(hash)) {
@@ -323,8 +390,8 @@ async function handleIncoming(payload) {
     setStatus("Duplicate skipped: replayed message");
     return;
   }
-  const text = await decryptText({ ownEcdhPrivateKey: localIdentity.ecdhPrivateKey, env });
-  appendMessage(env.sender, text);
+  const text = await (env.kind === "stego" ? decryptStego : decryptText)({ ownEcdhPrivateKey: localIdentity.ecdhPrivateKey, env });
+  appendMessage(env.sender, text, false, env.kind);
   await markSignatureSeen(hash);
   rejectedDeliveries.get(payload.id)?.remove();
   rejectedDeliveries.delete(payload.id);
@@ -345,8 +412,13 @@ socket.on("message", (payload) => {
 element("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (sending) return;
+  if (coverLoading || coverTooLarge || (coverInput.files.length && !selectedCover)) {
+    setStatus("Choose a valid cover image and keep usage at or below 50%.", "error");
+    return;
+  }
   const recipient = selectedRecipient();
   const text = messageInput.value;
+  const cover = selectedCover, attachment = coverRequest;
   if (!/^[a-z0-9_]{3,32}$/.test(recipient) || !text.trim() || text.length > 2000) {
     setStatus("Enter a valid recipient and a message of 1–2000 characters.", "error");
     return;
@@ -364,25 +436,44 @@ element("chat-form").addEventListener("submit", async (event) => {
     if (!keys || selectedRecipient() !== recipient || changedContacts.has(recipient)) return;
     const identity = localIdentity;
     setStatus("Encrypting...");
-    const envelope = await encryptText({ ownIdentity: identityKeyPairs(identity),
-      recipientEcdhJwk: keys.ecdh_jwk, sender: currentUsername, recipient, text });
+    let coverHash;
+    if (cover) {
+      coverHash = await sha256Hex(await cover.arrayBuffer());
+      if (usedCovers.has(coverHash)) {
+        element("cover-warning").textContent = "This cover was already used. Choose a fresh image.";
+        return;
+      }
+    }
+    const params = { ownIdentity: identityKeyPairs(identity), recipientEcdhJwk: keys.ecdh_jwk,
+      sender: currentUsername, recipient, text };
+    const result = cover ? await encryptStego({ ...params, coverBlob: cover, maxStegoBytes }) : null;
+    const envelope = result ? result.envelope : await encryptText(params);
     if (selectedRecipient() !== recipient || localIdentity !== identity
-      || currentRecipientKeyData !== keys || changedContacts.has(recipient)) return;
+      || currentRecipientKeyData !== keys || changedContacts.has(recipient) || attachment !== coverRequest) return;
+    // SECURITY: reserve a cover before emitting, including uncertain delivery.
+    if (coverHash) usedCovers.add(coverHash);
     const ack = await new Promise((resolve, reject) => {
       socket.timeout(10000).emit("send_message", envelope, (error, response) => {
         if (error) reject(new Error("send timed out")); else resolve(response);
       });
     });
     if (!ack?.ok) {
-      const reasons = new Set(["queue_full", "rate_limited", "recipient not found", "message too large", "unauthorized"]);
+      // Even a rejected envelope transmitted a carrier; keep it reserved.
+      if (coverHash) element("cover-warning").textContent = "This cover was transmitted. Choose a fresh image for another attempt.";
+      const reasons = new Set(["queue_full", "rate_limited", "recipient not found", "message too large", "image too large", "unauthorized"]);
       setStatus(`Message not sent: ${reasons.has(ack?.error) ? ack.error : "server rejected the envelope"}`, "error");
       return;
     }
-    appendMessage(currentUsername, text, true);
+    appendMessage(currentUsername, text, true, envelope.kind);
+    if (cover && selectedCover === cover) removeCover();
     setStatus("Message sent", "success");
     if (messageInput.value === text) messageInput.value = "";
     messageInput.focus();
-  } catch { setStatus("Could not confirm sending. Check your connection before retrying.", "error"); }
+  } catch (error) {
+    setStatus(error.message === "image too large"
+      ? `Stego PNG exceeds the ${(maxStegoBytes / 1048576).toFixed(2)} MiB image limit. Choose a smaller cover.`
+      : "Could not confirm sending. Check the image and connection before retrying.", "error");
+  }
   finally { sending = false; updateSendButton(); }
 });
 // Browser console acceptance check: console.table(await e2ee.selfTest()).

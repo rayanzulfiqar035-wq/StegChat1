@@ -73,10 +73,15 @@ class PendingMessage(db.Model):
 
     def envelope(self) -> dict:
         """Rebuild the original signed fields without modifying their encoding."""
-        return {"id": self.id, "v": 1, "kind": self.kind,
+        envelope = {"id": self.id, "v": 1, "kind": self.kind,
                 "sender": self.sender.username, "recipient": self.recipient.username,
                 "ts": self.client_ts, "eph": self.ephemeral_public_key,
-                "iv": self.iv, "ct": self.ciphertext, "sig": self.signature}
+                "sig": self.signature}
+        if self.kind == "text":
+            envelope.update(iv=self.iv, ct=self.ciphertext)
+        else:
+            envelope["img"] = self.ciphertext
+        return envelope
 
 
 class LoginAttempt(db.Model):

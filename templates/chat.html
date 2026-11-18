@@ -2,7 +2,7 @@
 {% block title %}Chat — Secure Chat{% endblock %}
 
 {% block content %}
-<section class="panel chat-panel">
+<section class="panel chat-panel" data-max-stego-bytes="{{ config.MAX_STEGO_BYTES }}">
   <div class="chat-header">
     <div class="user-meta">
       <div>
@@ -55,6 +55,15 @@
   </div>
 
   <div id="chat-status" class="chat-status" role="status" aria-live="polite"></div>
+
+  <div class="field">
+    <label for="cover-image">Attach cover image (optional, opaque PNG)</label>
+    <input id="cover-image" type="file" accept="image/png">
+    <button id="remove-cover" class="btn btn--ghost btn--small" type="button">Remove image</button>
+    <span class="field-hint">Use each cover image only once. PNGs must be opaque and 256–4096 pixels per side.</span>
+    <span id="cover-usage" class="field-hint" aria-live="polite"></span>
+    <span id="cover-warning" class="field-error" role="status"></span>
+  </div>
 
   <form id="chat-form" class="chat-form" novalidate>
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

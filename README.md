@@ -1,6 +1,6 @@
 # Secure E2EE Messenger
 
-A client-server web messaging app for an information-security course project. Implemented through Step 9: browser identity keys, encrypted chat and delivery queue, web security hardening, and an opt-in standalone PNG steganography lab.
+A client-server web messaging app for an information-security course project. Implemented through Step 10: encrypted text and PNG stego chat, temporary delivery queues, web security hardening, and an opt-in standalone steganography lab.
 
 ## Run the App
 
@@ -70,7 +70,7 @@ python -m bandit app.py api.py auth.py config.py events.py extensions.py models.
 python -m pip check
 ```
 
-For the Step 6-9 HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
+For the Step 6-10 HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
 
 ```powershell
 node tests/browser_step6.mjs
@@ -124,5 +124,15 @@ Choose a fully opaque PNG between 256 and 4096 pixels per side, enter text and a
 Only RGB least significant bits carry the frame; alpha is preserved. Usage includes a four-byte length header: above 10% shows a warning, and above 50% is refused. A wrong key can fail or produce garbage because this standalone raw-byte frame is not authenticated. Steganography here hides bytes without encrypting them; PNG conversion to JPEG is unsupported and extraction is rejected. Images, text and keys stay local to the page, with no server upload or chat integration.
 
 See [Step 9 acceptance results](docs/STEP_09_stego_core.checks.md).
+
+## Encrypted PNG messages in chat (Step 10)
+
+In Chat, choose **Attach cover image**, enter the recipient and message, then Send. The PNG must be fully opaque and 256–4096 pixels per side. **Remove image** switches back to normal encrypted text. This chat feature works independently of the opt-in lab flag.
+
+Use each cover image once. The page blocks an identical file already transmitted during the current page session, including unsuccessful/uncertain delivery attempts, and clears attachments after successful sends. Across reloads or devices, choose a genuinely fresh cover yourself. Usage above 10% shows a warning; above 50% is refused, counting the length header, IV and authentication tag. The final exported PNG is limited to `MAX_STEGO_BYTES` (default 3 MiB). Stego sends are limited to 5/minute per account within the existing 30/minute overall send limit.
+
+The browser encrypts the text before embedding it, using independent HKDF keys for AES-GCM and stego positions. A signature covers the PNG hash and message metadata. The recipient verifies the signature before extraction/decryption and rendering. The server stores/relays the PNG bytes unchanged, including while the recipient is offline, and deletes the row on the recipient's acknowledgment. Rejected images remain pending until explicitly dismissed or expired. Re-saving or converting a carrier invalidates its signature; JPEG is unsupported.
+
+See [Step 10 acceptance results](docs/STEP_10_stego_integration.checks.md).
 
 Tests for earlier steps explicitly disable rate counters when exercising large queues; `tests/test_step8.py` checks the actual enabled HTTP/socket limits. The browser suite keeps CSP and other headers active and verifies inline-script blocking in a temporary test-only page.

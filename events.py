@@ -40,12 +40,12 @@ _connected_users: dict[int, set[str]] = {}
 _connections_lock = RLock()
 
 
-def _send_rate_allowed(user_id):
+def _send_rate_allowed(user_id, bucket="socket_send_rates", limit=30):
     """Sliding-minute counter shared by this user's tabs and reconnects."""
     if not current_app.config["SOCKET_RATE_LIMIT_ENABLED"]:
         return True
     with _connections_lock:
-        counters = current_app.extensions.setdefault("socket_send_rates", {})
+        counters = current_app.extensions.setdefault(bucket, {})
         now = monotonic()
         # SECURITY: remove idle entries to keep the in-memory limiter bounded.
         for uid in list(counters):
@@ -54,7 +54,7 @@ def _send_rate_allowed(user_id):
         events = counters.setdefault(user_id, deque())
         while events and events[0] <= now - 60:
             events.popleft()
-        if len(events) >= 30:
+        if len(events) >= limit:
             return False
         events.append(now)
         return True
@@ -68,7 +68,7 @@ def reject_message(reason):
 # §12 envelope: version 1, text kind only until Step 9 adds `stego`.
 _ENVELOPE_VERSION = 1
 _TEXT_FIELDS = ("v", "kind", "sender", "recipient", "ts", "eph", "iv", "ct", "sig")
-_TEXT_B64_FIELDS = ("eph", "iv", "ct", "sig")
+_STEGO_FIELDS = ("v", "kind", "sender", "recipient", "ts", "eph", "img", "sig")
 _USERNAME_RE = re.compile(r"^[a-z0-9_]{3,32}$")
 # §12: raw P-256 public point is 65 bytes (0x04 || X || Y); AES-GCM IV is 12.
 _EPH_BYTES = 65
@@ -93,57 +93,57 @@ def _decode_b64(value: str) -> bytes:
 
 
 def _validate_envelope(data: Any, sender: str) -> dict[str, Any]:
-    """Validate a client envelope against main spec §12 and return a clean copy.
-
-    SECURITY: only the documented fields are accepted (no extra members), every
-    field is type-checked, the claimed sender must be the session user, and the
-    size limit stops an oversized envelope from being relayed or buffered.
-    """
+    """Validate envelope bytes without decoding or re-encoding PNG pixels."""
     if not isinstance(data, dict):
         raise EnvelopeError("invalid payload")
-    if set(data.keys()) != set(_TEXT_FIELDS):
-        raise EnvelopeError("invalid payload")
-
-    if type(data["v"]) is not int or data["v"] != _ENVELOPE_VERSION:
-        raise EnvelopeError("unsupported version")
-    if data["kind"] != "text":
+    kind = data.get("kind")
+    if kind not in ("text", "stego"):
         raise EnvelopeError("unsupported kind")
-
-    # SECURITY: the server never trusts a client-supplied sender (§11).
+    fields = _TEXT_FIELDS if kind == "text" else _STEGO_FIELDS
+    if set(data) != set(fields):
+        raise EnvelopeError("invalid payload")
+    if type(data["v"]) is not int or data["v"] != 1:
+        raise EnvelopeError("unsupported version")
     if not isinstance(data["sender"], str) or data["sender"] != sender:
         raise EnvelopeError("sender mismatch")
-
-    recipient = data["recipient"]
-    if not isinstance(recipient, str) or not _USERNAME_RE.fullmatch(recipient):
+    if not isinstance(data["recipient"], str) or not _USERNAME_RE.fullmatch(data["recipient"]):
         raise EnvelopeError("invalid recipient")
-
-    ts = data["ts"]
-    if type(ts) is not int or not 0 < ts <= 9_007_199_254_740_991:
+    if type(data["ts"]) is not int or not 0 < data["ts"] <= 9_007_199_254_740_991:
         raise EnvelopeError("invalid timestamp")
-
-    for field in _TEXT_B64_FIELDS:
-        if not isinstance(data[field], str):
-            raise EnvelopeError("invalid payload")
-
-    # SECURITY: bound the whole JSON envelope before allocating decoded fields.
-    limit = int(current_app.config["MAX_TEXT_BYTES"])
-    if any(len(data[field]) > limit for field in _TEXT_B64_FIELDS):
-        raise EnvelopeError("message too large")
-    if len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > limit:
-        raise EnvelopeError("message too large")
-
-    ephemeral = _decode_b64(data["eph"])
-    if len(ephemeral) != _EPH_BYTES or ephemeral[0] != 0x04:
+    binary_fields = ("eph", "sig", "iv", "ct") if kind == "text" else ("eph", "sig", "img")
+    if any(not isinstance(data[f], str) for f in binary_fields):
+        raise EnvelopeError("invalid payload")
+    # SECURITY: fixed public-point/signature sizes are checked before decoding.
+    if len(data["eph"]) != 88:
         raise EnvelopeError("invalid ephemeral key")
-    if len(_decode_b64(data["iv"])) != _IV_BYTES:
-        raise EnvelopeError("invalid iv")
+    if len(data["sig"]) != 88:
+        raise EnvelopeError("invalid signature")
+    if kind == "text":
+        limit = int(current_app.config["MAX_TEXT_BYTES"])
+        if any(len(data[f]) > limit for f in binary_fields) or len(
+                json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > limit:
+            raise EnvelopeError("message too large")
+    else:
+        limit = int(current_app.config["MAX_STEGO_BYTES"])
+        if len(data["img"]) > 4 * ((limit + 2) // 3):
+            raise EnvelopeError("image too large")
+    ephemeral = _decode_b64(data["eph"])
+    if len(ephemeral) != 65 or ephemeral[0] != 4:
+        raise EnvelopeError("invalid ephemeral key")
     if len(_decode_b64(data["sig"])) != 64:
         raise EnvelopeError("invalid signature")
-    ciphertext = _decode_b64(data["ct"])
-    if len(ciphertext) < 16:
-        raise EnvelopeError("invalid ciphertext")
-
-    return {field: data[field] for field in _TEXT_FIELDS}
+    if kind == "text":
+        if len(_decode_b64(data["iv"])) != 12:
+            raise EnvelopeError("invalid iv")
+        if len(_decode_b64(data["ct"])) < 16:
+            raise EnvelopeError("invalid ciphertext")
+    else:
+        png = _decode_b64(data["img"])
+        if len(png) > limit:
+            raise EnvelopeError("image too large")
+        if not png.startswith(bytes((137,80,78,71,13,10,26,10))):
+            raise EnvelopeError("invalid PNG")
+    return {field: data[field] for field in fields}
 
 
 def handle_connect() -> bool | None:
@@ -193,7 +193,7 @@ def disconnect_user(user_id: int) -> None:
 def handle_send_message(data: Any) -> dict[str, Any]:
     """Persist an encrypted envelope and relay it when the recipient is online.
 
-    Payload: text envelope from main spec §12.
+    Payload: text or stego envelope from main spec section 12.
     Ack: {"ok": True, "id": <delivery id>} or {"ok": False, "error": <reason>}
 
     SECURITY: this handler contains no decryption path and no key material. It
@@ -204,6 +204,11 @@ def handle_send_message(data: Any) -> dict[str, Any]:
         return reject_message("unauthorized")
 
     if not _send_rate_allowed(current_user.id):
+        audit_event("rate_limit", current_user.username, reason="socket")
+        return {"ok": False, "error": "rate_limited"}
+
+    if isinstance(data, dict) and data.get("kind") == "stego" and not _send_rate_allowed(
+            current_user.id, "socket_stego_rates", 5):
         audit_event("rate_limit", current_user.username, reason="socket")
         return {"ok": False, "error": "rate_limited"}
 
@@ -230,8 +235,8 @@ def handle_send_message(data: Any) -> dict[str, Any]:
             if count >= current_app.config["MAX_PENDING_PER_PAIR"]:
                 return reject_message("queue_full")
             message = PendingMessage(sender_id=current_user.id, recipient_id=recipient.id,
-                                     kind=envelope["kind"], ciphertext=envelope["ct"],
-                                     iv=envelope["iv"], ephemeral_public_key=envelope["eph"],
+                                     kind=envelope["kind"], ciphertext=envelope["ct"] if envelope["kind"] == "text" else envelope["img"],
+                                     iv=envelope.get("iv"), ephemeral_public_key=envelope["eph"],
                                      signature=envelope["sig"], client_ts=envelope["ts"])
             db.session.add(message)
             db.session.commit()

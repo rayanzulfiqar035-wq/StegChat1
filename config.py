@@ -104,7 +104,7 @@ class Config:
     SESSION_COOKIE_SECURE = True
     # Cap incoming request bodies to slightly above the largest allowed envelope
     # (MAX_STEGO_BYTES = 3 MiB) to prevent memory exhaustion via oversized uploads.
-    MAX_CONTENT_LENGTH = MAX_STEGO_BYTES + 65536  # 3 MiB + 64 KiB headroom
+    MAX_CONTENT_LENGTH = max(MAX_TEXT_BYTES, 4 * ((MAX_STEGO_BYTES + 2) // 3)) + 65536
 
     @classmethod
     def validate(cls) -> None:

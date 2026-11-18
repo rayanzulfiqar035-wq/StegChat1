@@ -29,6 +29,7 @@ from config import Config
 from extensions import socketio
 from extensions import db
 from models import PendingMessage
+import base64
 from flask import jsonify, render_template_string
 from datetime import datetime, timedelta, timezone
 from cleanup import delete_expired_messages
@@ -47,7 +48,13 @@ def csp_experiment():
  return render_template_string('''<!doctype html><meta name="csrf-token" content="test"><script>window.__inlineExecuted=true;</script><p>CSP experiment</p>''')
 @app.get('/__test/pending')
 def pending():
- return jsonify([{'id':m.id,'ct':m.ciphertext,'sig':m.signature} for m in PendingMessage.query.all()])
+ return jsonify([{'id':m.id,'ct':m.ciphertext,'sig':m.signature,'kind':m.kind,'iv':m.iv} for m in PendingMessage.query.all()])
+@app.get('/__test/tamper-png/<int:delivery_id>')
+def tamper_png(delivery_id):
+ m=db.session.get(PendingMessage,delivery_id)
+ raw=bytearray(base64.b64decode(m.ciphertext));raw[-1]^=1
+ m.ciphertext=base64.b64encode(raw).decode('ascii');db.session.commit()
+ return jsonify(ok=True)
 @app.get('/__test/expire')
 def expire():
  for m in PendingMessage.query.all(): m.created_at=datetime.now(timezone.utc)-timedelta(days=8)
@@ -208,7 +215,7 @@ try {
     await wait(page, "!document.getElementById('send-btn').disabled");
   }
   async function send(page, text) {
-    await evaluate(page, `{document.getElementById('message-input').value=${JSON.stringify(text)};document.getElementById('chat-form').dispatchEvent(new Event('submit',{cancelable:true}));}`);
+    await evaluate(page, `{document.getElementById('message-input').value=${JSON.stringify(text)};document.getElementById('message-input').dispatchEvent(new Event('input'));document.getElementById('chat-form').dispatchEvent(new Event('submit',{cancelable:true}));}`);
     await wait(page, `document.getElementById('chat-status').textContent==='Message sent' && document.getElementById('message-input').value===''`);
     return evaluate(page, "window.__lastEnvelope");
   }
@@ -380,6 +387,101 @@ try {
   check("expiry removes undelivered ciphertext", (await pendingRows()).some(r=>r.ct===expireEnvelope.ct)
     && (await evaluate(alice, "fetch('/__test/expire').then(r=>r.json())")).deleted > 0
     && (await pendingRows()).length===0);
+
+  // Step 10: encrypted PNG through the actual chat controls and pending queue.
+  await select(alice, 'bob');
+  await evaluate(bob, "fetch('/logout',{method:'POST',headers:{'X-CSRFToken':document.querySelector('meta[name=\"csrf-token\"]').content}}).then(r=>r.status)");
+  await evaluate(alice, `(async()=>{
+    const s=await import('/static/js/stego.js'),canvas=document.createElement('canvas');
+    canvas.width=canvas.height=256;const ctx=canvas.getContext('2d');ctx.fillStyle='rgb(80,120,170)';ctx.fillRect(0,0,256,256);
+    window.__chatCover=await s.pngBlob(canvas);
+    const dt=new DataTransfer();dt.items.add(new File([window.__chatCover],'fresh-cover.png',{type:'image/png'}));
+    document.getElementById('cover-image').files=dt.files;document.getElementById('cover-image').dispatchEvent(new Event('change'));
+  })()`);
+  await wait(alice, "document.getElementById('cover-usage').textContent.includes('capacity') && !document.getElementById('send-btn').disabled");
+  await evaluate(alice,"document.getElementById('message-input').value='界'.repeat(2000);document.getElementById('message-input').dispatchEvent(new Event('input'))");
+  check('chat warns above ten percent capacity using UTF-8 bytes',await evaluate(alice,"document.getElementById('cover-warning').textContent.includes('Above 10%')"));
+  const stegoText='offline encrypted PNG message ✓';
+  const stegoFirst=await send(alice,stegoText);
+  const stegoRow=(await pendingRows()).find(r=>r.ct===stegoFirst.img);
+  check('offline stego is stored unchanged with a null IV and no outer ciphertext fields',
+    !!stegoRow && stegoRow.kind==='stego' && stegoRow.iv===null
+    && Object.keys(stegoFirst).sort().join(',')==='eph,img,kind,recipient,sender,sig,ts,v');
+  check('successful stego send clears the attachment and warns to use covers once',await evaluate(alice,
+    "document.getElementById('cover-image').files.length===0 && document.querySelector('.chat-panel').textContent.includes('Use each cover image only once')"));
+  await evaluate(bob, `(async()=>{const token=document.querySelector('meta[name="csrf-token"]').content;
+    await fetch('/login',{method:'POST',body:new URLSearchParams({username:'bob',password:'browser-test-password-123',csrf_token:token})});})()`);
+  await navigate(bob,'/chat');await wait(bob,identityReady);await wait(bob,contains(stegoText));
+  await wait(alice,`fetch('/__test/pending').then(r=>r.json()).then(rows=>!rows.some(r=>r.id===${stegoRow.id}))`);
+  check('offline recipient login verifies, extracts, decrypts, renders and acknowledges stego',true);
+  check('saved WSS PNG opens normally and changes RGB by at most one level',await evaluate(alice,`(async()=>{
+    const c=await import('/static/js/crypto.js'),s=await import('/static/js/stego.js');
+    const original=await s.loadImage(window.__chatCover),stego=await s.loadImage(new Blob([c.fromB64(${JSON.stringify(stegoFirst.img)})],{type:'image/png'}));
+    return original.imageData.data.every((v,i)=>i%4===3?v===stego.imageData.data[i]:Math.abs(v-stego.imageData.data[i])<=1);
+  })()`));
+  // Independent Web Crypto derivation checks both purpose labels and signed bytes.
+  await evaluate(bob,`window.__referenceStego=async function(env){
+    const c=await import('/static/js/crypto.js'),s=await import('/static/js/stego.js'),k=await import('/static/js/keystore.js');
+    const identity=await k.getIdentity('bob');
+    const ephemeral=await crypto.subtle.importKey('raw',c.fromB64(env.eph),{name:'ECDH',namedCurve:'P-256'},false,[]);
+    const bits=await crypto.subtle.deriveBits({name:'ECDH',public:ephemeral},identity.ecdhPrivateKey,256);
+    const shared=await crypto.subtle.importKey('raw',bits,'HKDF',false,['deriveBits','deriveKey']);
+    const params={name:'HKDF',hash:'SHA-256',salt:new Uint8Array(32)};
+    const positionsKey=new Uint8Array(await crypto.subtle.deriveBits({...params,info:new TextEncoder().encode('stego-positions')},shared,256));
+    const aes=await crypto.subtle.deriveKey({...params,info:new TextEncoder().encode('message-encryption')},shared,{name:'AES-GCM',length:256},false,['decrypt']);
+    const png=c.fromB64(env.img),payload=await s.extract(new Blob([png],{type:'image/png'}),positionsKey);
+    const aad=new TextEncoder().encode('v1|stego|'+env.sender+'|'+env.recipient+'|'+env.ts);
+    const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:payload.slice(0,12),tagLength:128,additionalData:aad},aes,payload.slice(12));
+    const wrong=await crypto.subtle.importKey('raw',positionsKey,'AES-GCM',false,['decrypt']);let gcmRejected=false;
+    try{await crypto.subtle.decrypt({name:'AES-GCM',iv:payload.slice(0,12),tagLength:128,additionalData:aad},wrong,payload.slice(12));}catch{gcmRejected=true;}
+    const stream=new s.PositionStream(positionsKey,256*256*3),positions=[];for(let i=0;i<100;i++)positions.push(await stream.next());
+    const sender=await(await fetch('/api/users/alice/keys')).json();
+    const signatureBytes=new TextEncoder().encode(JSON.stringify(['v1','stego',env.sender,env.recipient,env.ts,env.eph,await c.sha256Hex(png)]));
+    const signatureOK=await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},await c.importPeerEcdsa(sender.ecdsa_jwk),c.fromB64(env.sig),signatureBytes);
+    return {text:new TextDecoder().decode(plain),gcmRejected,positions,signatureOK,iv:c.toB64(payload.slice(0,12))};
+  }`);
+  const referenceFirst=await evaluate(bob,`window.__referenceStego(${JSON.stringify(stegoFirst)})`);
+  check('independent HKDF/AAD/signature reference decrypts and rejects the positions key as AES',referenceFirst.text===stegoText&&referenceFirst.gcmRejected&&referenceFirst.signatureOK);
+  check('third account cannot decrypt a captured encrypted PNG',await evaluate(recovery,`(async()=>{
+    const c=await import('/static/js/crypto.js'),k=await import('/static/js/keystore.js'),identity=await k.getIdentity('carol');
+    try{await c.decryptStego({ownEcdhPrivateKey:identity.ecdhPrivateKey,env:${JSON.stringify(stegoFirst)}});return false;}catch{return true;}
+  })()`));
+  await evaluate(alice,`(async()=>{const c=await import('/static/js/crypto.js'),k=await import('/static/js/keystore.js'),i=await k.getIdentity('alice'),peer=await(await fetch('/api/users/bob/keys')).json();
+    window.__stegoParams={ownIdentity:{ecdh:{privateKey:i.ecdhPrivateKey,publicKey:i.ecdhPublicKey},ecdsa:{privateKey:i.ecdsaPrivateKey,publicKey:i.ecdsaPublicKey}},recipientEcdhJwk:peer.ecdh_jwk,sender:'alice',recipient:'bob',text:${JSON.stringify(stegoText)},coverBlob:window.__chatCover};
+    window.__stegoSecond=(await c.encryptStego(window.__stegoParams)).envelope;
+  })()`);
+  const stegoSecond=await evaluate(alice,'window.__stegoSecond');
+  const referenceSecond=await evaluate(bob,`window.__referenceStego(${JSON.stringify(stegoSecond)})`);
+  check('same-cover crypto uses fresh ephemeral keys, IVs and different positions',stegoFirst.eph!==stegoSecond.eph&&referenceFirst.iv!==referenceSecond.iv&&referenceFirst.positions.some((v,i)=>v!==referenceSecond.positions[i]));
+  await evaluate(alice,`{const dt=new DataTransfer();dt.items.add(new File([window.__chatCover],'same-cover.png',{type:'image/png'}));document.getElementById('cover-image').files=dt.files;document.getElementById('cover-image').dispatchEvent(new Event('change'));}`);
+  await wait(alice,"!document.getElementById('send-btn').disabled");
+  await evaluate(alice,"document.getElementById('message-input').value='must not reuse cover';document.getElementById('chat-form').dispatchEvent(new Event('submit',{cancelable:true}))");
+  await wait(alice,"document.getElementById('cover-warning').textContent.includes('already used')");
+  check('chat blocks accidental cover reuse',await evaluate(alice,'window.__lastEnvelope.img')===stegoFirst.img);
+  await evaluate(alice,"document.getElementById('remove-cover').click()");
+  await evaluate(bob,'void e2ee.socket.disconnect()');
+  const queuedStego=await emit(alice,stegoSecond);
+  await evaluate(alice,`fetch('/__test/tamper-png/${queuedStego.id}').then(r=>r.json())`);
+  await evaluate(bob,'void e2ee.socket.connect()');
+  await wait(bob,"document.getElementById('chat-status').textContent.includes('bad signature')");
+  check('single-byte queued PNG tampering fails signature and is not acknowledged',(await pendingRows()).some(r=>r.id===queuedStego.id));
+  check('JPEG conversion of encrypted PNG is refused',await evaluate(bob,`(async()=>{
+    const c=await import('/static/js/crypto.js'),s=await import('/static/js/stego.js'),k=await import('/static/js/keystore.js'),i=await k.getIdentity('bob');
+    const image=await s.loadImage(new Blob([c.fromB64(${JSON.stringify(stegoFirst.img)})],{type:'image/png'}));
+    const jpeg=await new Promise(resolve=>image.canvas.toBlob(resolve,'image/jpeg'));
+    try{await c.decryptStego({ownEcdhPrivateKey:i.ecdhPrivateKey,env:{...${JSON.stringify(stegoFirst)},img:c.toB64(await jpeg.arrayBuffer())}});return false;}catch{return true;}
+  })()`));
+  const largeRejected=await evaluate(alice,`(async()=>{
+    const c=await import('/static/js/crypto.js'),png=new Uint8Array(3145729);png.set([137,80,78,71,13,10,26,10]);
+    return await new Promise(resolve=>e2ee.socket.emit('send_message',{...window.__lastEnvelope,img:c.toB64(png)},resolve));
+  })()`);
+  check('oversized image gets a clear server rejection',largeRejected.ok===false&&largeRejected.error==='image too large');
+  check('sender refuses oversized exported PNG before transmission',await evaluate(alice,`(async()=>{
+    const c=await import('/static/js/crypto.js');try{await c.encryptStego({...window.__stegoParams,maxStegoBytes:1});return false;}catch(e){return e.message==='image too large';}
+  })()`));
+  check('encrypted payload above fifty percent is refused',await evaluate(alice,`(async()=>{
+    const c=await import('/static/js/crypto.js');try{await c.encryptStego({...window.__stegoParams,text:'x'.repeat(12257)});return false;}catch(e){return e.message.includes('50%');}
+  })()`));
 
   await evaluate(alice, "fetch('/logout',{method:'POST',headers:{'X-CSRFToken':document.querySelector('meta[name=\"csrf-token\"]').content}}).then(r=>r.status)");
   await wait(alice, "!e2ee.socket.connected");

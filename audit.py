@@ -12,7 +12,7 @@ EVENTS = {"registration", "login_success", "login_failure", "logout", "keys_uplo
 REASONS = {"http", "socket", "csrf", "invalid payload", "unsupported version", "unsupported kind",
            "sender mismatch", "invalid recipient", "invalid timestamp", "invalid base64",
            "message too large", "invalid ephemeral key", "invalid iv", "invalid signature",
-           "invalid ciphertext", "recipient not found", "unauthorized", "queue_full", "storage unavailable"}
+           "invalid ciphertext", "invalid PNG", "image too large", "recipient not found", "unauthorized", "queue_full", "storage unavailable"}
 
 
 def init_audit(app):

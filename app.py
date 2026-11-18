@@ -81,6 +81,7 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     socketio.init_app(
         app,
         cors_allowed_origins=["https://localhost:5000", "https://127.0.0.1:5000"],
+        max_http_buffer_size=max(5_000_000, 4 * ((app.config["MAX_STEGO_BYTES"] + 2) // 3) + 65536),
     )
 
     # Register blueprints.
