@@ -1,0 +1,29 @@
+{
+  "width": 256,
+  "height": 256,
+  "mode": "LSB replacement",
+  "cover": "Synthetic even-valued RGB gradient; deliberately histogram-biased, not a photograph.",
+  "fillDefinition": "(UTF-8 plaintext + 12-byte IV + 16-byte GCM tag + 4-byte length) * 8 / RGB channels",
+  "experiments": [
+    {
+      "name": "low_fill",
+      "plaintextBytes": 100,
+      "encryptedPayloadBytes": 128,
+      "framedBytes": 132,
+      "usedFraction": 0.00537109375,
+      "changedChannels": 533,
+      "signatureOK": true,
+      "roundTrip": true
+    },
+    {
+      "name": "high_fill",
+      "plaintextBytes": 12256,
+      "encryptedPayloadBytes": 12284,
+      "framedBytes": 12288,
+      "usedFraction": 0.5,
+      "changedChannels": 49033,
+      "signatureOK": true,
+      "roundTrip": true
+    }
+  ]
+}

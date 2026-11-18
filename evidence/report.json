@@ -1,0 +1,10 @@
+{
+  "width": 256,
+  "height": 256,
+  "channel_values": 196608,
+  "changed_channels": 533,
+  "changed_percent": 0.27109781901041663,
+  "original_chi_square": 98304.0,
+  "stego_chi_square": 97241.69753940053,
+  "statistic": "Step 11 even-term pairs-of-values sum; RGB; no p-value"
+}

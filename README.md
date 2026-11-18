@@ -1,6 +1,6 @@
 # Secure E2EE Messenger
 
-A client-server web messaging app for an information-security course project. Implemented through Step 10: encrypted text and PNG stego chat, temporary delivery queues, web security hardening, and an opt-in standalone steganography lab.
+A client-server web messaging app for an information-security course project. Implemented through Step 10, plus Step 11 Parts A and D: security regression tests and stego analysis. Includes encrypted text and PNG stego chat, temporary delivery queues, web security hardening, and an opt-in standalone steganography lab.
 
 ## Run the App
 
@@ -65,10 +65,14 @@ If the browser reports `ERR_CERT_AUTHORITY_INVALID`, install the existing local 
 Activate the virtual environment, then run:
 
 ```powershell
+python -m pip install -r requirements-analysis.txt
 python -m pytest -q
 python -m bandit app.py api.py auth.py config.py events.py extensions.py models.py cleanup.py audit.py -q
 python -m pip check
 ```
+
+Pillow and NumPy are used by the offline Step 11 analysis tool and its tests;
+they are pinned separately from the application dependencies.
 
 For the Step 6-10 HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
 
@@ -98,6 +102,22 @@ See [Step 6 acceptance results](docs/STEP_06_encryption.checks.md).
 See [Step 7 acceptance results](docs/STEP_07_pending_queue.checks.md).
 
 See [Step 8 acceptance results](docs/STEP_08_hardening.checks.md).
+
+## Step 11 analysis
+
+Install the analysis dependencies before running the full test suite:
+
+```powershell
+python -m pip install -r requirements-analysis.txt
+python tools/stego_analysis.py original.png stego.png
+```
+
+The tool writes `diff.png`, black-and-white RGB LSB planes and `report.json`
+under `evidence/`; use `--output-dir` to keep experiments separate. The saved
+low-fill and high-fill experiments use real browser encryption with synthetic
+messages. See [evidence and reproduction commands](evidence/README.md) and
+[Step 11 results](docs/STEP_11_tests_and_analysis.checks.md). Parts A and D are
+implemented; the team's Part B scans and Part C captures remain pending.
 
 ## Security hardening
 

@@ -554,6 +554,56 @@ try {
   check('lab sends no images, payload text or secret keys to the server and opens no sockets',
     lab.urls.length===socketStart && lab.requests.slice(requestStart).filter(r=>r.url.startsWith(base)).every(r=>r.method==='GET'&&!r.body));
 
+  // Optional Step 11 artifacts: synthetic cover and real encrypted PNGs only.
+  // SECURITY: fresh test identities remain in browser memory; never export keys.
+  if (process.env.STEGO_ANALYSIS_DIR) {
+    const directory = path.resolve(process.env.STEGO_ANALYSIS_DIR);
+    const experiments = await evaluate(lab, `(async()=>{
+      const c=await import('/static/js/crypto.js'),s=await import('/static/js/stego.js');
+      const canvas=document.createElement('canvas');canvas.width=canvas.height=256;
+      const context=canvas.getContext('2d'),pixels=context.createImageData(256,256);
+      // Intentionally even-valued gradient: a controlled histogram demonstration,
+      // not a claim about the statistics of natural photographs.
+      for(let y=0;y<256;y++)for(let x=0;x<256;x++){
+        const i=(y*256+x)*4;pixels.data[i]=2*(x>>1);pixels.data[i+1]=2*(y>>1);
+        pixels.data[i+2]=2*(((x+y)>>2)%128);pixels.data[i+3]=255;
+      }
+      context.putImageData(pixels,0,0);const cover=await s.pngBlob(canvas);
+      const ownIdentity=await c.generateIdentity(),recipientIdentity=await c.generateIdentity();
+      const recipientEcdhJwk=await c.exportPublicJwk(recipientIdentity.ecdh.publicKey);
+      const results=[];
+      for(const [name,plaintextBytes] of [['low_fill',100],['high_fill',12256]]){
+        const text='A'.repeat(plaintextBytes);
+        const result=await c.encryptStego({ownIdentity,recipientEcdhJwk,
+          sender:'analysis_sender',recipient:'analysis_recipient',text,coverBlob:cover});
+        const env=result.envelope;
+        const signed=new TextEncoder().encode(JSON.stringify(['v1','stego',env.sender,env.recipient,env.ts,env.eph,await c.sha256Hex(c.fromB64(env.img))]));
+        const signatureOK=await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},ownIdentity.ecdsa.publicKey,c.fromB64(env.sig),signed);
+        const roundTrip=await c.decryptStego({ownEcdhPrivateKey:recipientIdentity.ecdh.privateKey,env})===text;
+        results.push({name,png:env.img,plaintextBytes,encryptedPayloadBytes:plaintextBytes+28,
+          framedBytes:plaintextBytes+32,usedFraction:result.usedFraction,
+          changedChannels:result.changedChannels,signatureOK,roundTrip});
+      }
+      return {cover:c.toB64(new Uint8Array(await cover.arrayBuffer())),results};
+    })()`);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory,'cover.png'),Buffer.from(experiments.cover,'base64'));
+    const manifest={width:256,height:256,mode:'LSB replacement',
+      cover:'Synthetic even-valued RGB gradient; deliberately histogram-biased, not a photograph.',
+      fillDefinition:'(UTF-8 plaintext + 12-byte IV + 16-byte GCM tag + 4-byte length) * 8 / RGB channels',
+      experiments:[]};
+    for(const {png,...measurement} of experiments.results){
+      await fs.writeFile(path.join(directory,measurement.name+'.png'),Buffer.from(png,'base64'));
+      manifest.experiments.push(measurement);
+      check('Step 11 '+measurement.name+' signature and encrypted PNG round trip',
+        measurement.signatureOK && measurement.roundTrip);
+    }
+    check('Step 11 experiments use under ten percent and exactly fifty percent capacity',
+      manifest.experiments[0].usedFraction<0.1 && manifest.experiments[1].usedFraction===0.5);
+    await fs.writeFile(path.join(directory,'manifest.json'),JSON.stringify(manifest,null,2)+'\n');
+    console.log('Synthetic Step 11 analysis inputs: '+directory);
+  }
+
   const cspPage = await page(`document.addEventListener('securitypolicyviolation', event => {
     (window.__cspViolations ||= []).push(event.violatedDirective);
   });`);

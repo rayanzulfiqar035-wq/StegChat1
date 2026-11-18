@@ -1,0 +1,3 @@
+# Optional offline analysis dependencies prescribed by Step 11.
+Pillow==13.0.0
+numpy==2.5.5

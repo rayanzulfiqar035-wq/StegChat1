@@ -1,0 +1,74 @@
+PASS HTTPS certificate verifies against the local CA
+PASS HTTP does not serve the application
+PASS two isolated browser sessions load trusted HTTPS with Web Crypto
+PASS connections use WSS
+PASS first initialization uploads exactly once per account
+PASS private identity committed before public-key upload
+PASS IndexedDB private keys are nonextractable CryptoKeys
+PASS all nine browser selfTest cases pass
+PASS registered contact without keys explains first-login setup and blocks send
+PASS retry succeeds after contact opens Chat without resetting any identity
+PASS unknown usernames get a distinct actionable explanation
+PASS HTTP 401 lookup failure gets a clear explanation
+PASS HTTP 429 lookup failure gets a clear explanation
+PASS contact trust saved under the same account-scoped lookup key
+PASS two browsers exchange readable encrypted messages
+PASS script text is harmless in actual DOM
+PASS new message has distinct eph and IV
+PASS WSS frames contain only ciphertext envelopes, never message text
+PASS captured envelope replay dropped using actual IndexedDB seen store
+PASS eight-day-old signed envelope rejected before rendering
+PASS ten-minute-future signed envelope rejected before rendering
+PASS tampered ciphertext rejected by signature before decryption
+PASS lost identity warns without connecting or automatically resetting
+PASS explicit reset publishes new keys
+PASS incoming replacement key is blocked
+PASS unchanged recipient input still detects peer reset before sending
+PASS both directions work after explicit trust
+PASS on-screen contact fingerprint matches peer fingerprint
+PASS immediate recipient switching never reuses the previous contact key
+PASS version-1 migration preserves identities, trust and replay records
+PASS storage abort prevents public upload and socket connection
+PASS upload failure retains nonextractable identity without connecting
+PASS reload retries the same durable identity after upload failure
+PASS offline encrypted message is persisted
+PASS reconnect decrypts, renders and deletes the queued row
+PASS rendered message survives a dropped acknowledgment
+PASS redelivery is acknowledged again without duplicate rendering
+PASS tampered delivery is not acknowledged automatically
+PASS explicit dismiss deletes a rejected delivery
+PASS expiry removes undelivered ciphertext
+PASS chat warns above ten percent capacity using UTF-8 bytes
+PASS offline stego is stored unchanged with a null IV and no outer ciphertext fields
+PASS successful stego send clears the attachment and warns to use covers once
+PASS offline recipient login verifies, extracts, decrypts, renders and acknowledges stego
+PASS saved WSS PNG opens normally and changes RGB by at most one level
+PASS independent HKDF/AAD/signature reference decrypts and rejects the positions key as AES
+PASS third account cannot decrypt a captured encrypted PNG
+PASS same-cover crypto uses fresh ephemeral keys, IVs and different positions
+PASS chat blocks accidental cover reuse
+PASS single-byte queued PNG tampering fails signature and is not acknowledged
+PASS JPEG conversion of encrypted PNG is refused
+PASS oversized image gets a clear server rejection
+PASS sender refuses oversized exported PNG before transmission
+PASS encrypted payload above fifty percent is refused
+PASS HTTP logout disconnects the live browser socket
+PASS no uncaught browser script errors
+PASS lab shows used capacity, changed channels and PNG download
+PASS lab embed/download/extract returns exact UTF-8 text as harmless DOM text
+PASS PNG changes stay within one RGB level and preserve alpha
+Stego comparison screenshot: C:\Users\User\AppData\Local\Temp\stegchat-test-audit-h3dLZQ\stego-comparison.png
+PASS wrong key fails cleanly without preserving misleading old output
+PASS all eleven lab self-tests pass, including 100000 unique positions and JPEG rejection
+PASS PNG dimension limits reject undersized and oversized images before decode
+PASS usage above ten percent is visibly warned
+PASS lab refuses payload above fifty percent and clears obsolete download
+PASS lab sends no images, payload text or secret keys to the server and opens no sockets
+PASS Step 11 low_fill signature and encrypted PNG round trip
+PASS Step 11 high_fill signature and encrypted PNG round trip
+PASS Step 11 experiments use under ten percent and exactly fifty percent capacity
+Synthetic Step 11 analysis inputs: C:\Users\User\Desktop\StegChat\sourceCode\evidence\synthetic
+PASS strict CSP blocks an inline script in a rendered test template
+PASS real HTTPS responses include CSP, HSTS and nosniff
+PASS browser audit contains account and key events without message content
+Browser acceptance: 71 passed, 0 failed

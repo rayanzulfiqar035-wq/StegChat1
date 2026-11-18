@@ -1,0 +1,7 @@
+Image size: 256 x 256 (RGB; alpha ignored)
+Changed channel values: 533 / 196608 (0.271098%)
+Original pairs-of-values chi-square: 98304.000000
+Stego pairs-of-values chi-square: 97241.697539
+Statistic: even term only; no p-value or automatic detection threshold.
+Saved diff.png, original_lsb.png, stego_lsb.png and report.json in evidence
+LSB images: black/white R, G, B planes from left to right.
