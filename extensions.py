@@ -10,6 +10,22 @@ from flask_login import LoginManager
 from flask_socketio import SocketIO
 from flask_sqlalchemy import SQLAlchemy
 from flask_wtf.csrf import CSRFProtect
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlite3 import Connection as SQLiteConnection
+
+
+@event.listens_for(Engine, "connect")
+def enable_secure_delete(connection, record):
+    """Overwrite deleted SQLite cells on every newly opened connection."""
+    if isinstance(connection, SQLiteConnection):
+        # SECURITY: this constant SQLite connection pragma is the sole SQL
+        # exception; all application data access continues through the ORM.
+        cursor = connection.cursor()
+        try:
+            cursor.execute("PRAGMA secure_delete = ON")
+        finally:
+            cursor.close()
 
 db = SQLAlchemy()
 

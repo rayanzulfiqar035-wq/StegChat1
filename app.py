@@ -33,7 +33,6 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     # SECURITY: never leave the interactive debugger enabled - it exposes an
     # arbitrary-code console and must not be switched on in this codebase.
     app.config["DEBUG"] = False
-    app.config["TESTING"] = False
 
     db.init_app(app)
     login_manager.init_app(app)
@@ -66,10 +65,15 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     # Create all database tables (SQLite file lives under instance/).
     with app.app_context():
         db.create_all()
+        from cleanup import delete_expired_messages
+        delete_expired_messages()
 
     _register_user_loader()
     _register_login_manager(app)
     _register_routes(app)
+    if not app.testing:
+        from cleanup import start_cleanup_task
+        app.extensions["message_cleanup_task"] = start_cleanup_task(app)
     return app
 
 

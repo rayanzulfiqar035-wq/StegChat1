@@ -26,9 +26,10 @@ from typing import Any
 from flask import current_app, request
 from flask_login import current_user
 from flask_socketio import emit, join_room
+from sqlalchemy.exc import SQLAlchemyError
 
-from extensions import socketio
-from models import User
+from extensions import db, socketio
+from models import PendingMessage, User
 
 # In-memory tracking of active connections per user ID.
 # Maps user_id -> set of active Socket.IO session IDs (sids).
@@ -130,6 +131,10 @@ def handle_connect() -> bool | None:
         user_id = current_user.id
         join_room(f"user:{user_id}")
         _connected_users.setdefault(user_id, set()).add(request.sid)
+        queued = PendingMessage.query.filter_by(recipient_id=user_id).order_by(
+            PendingMessage.created_at, PendingMessage.id).limit(200).all()
+        for message in queued:
+            emit("message", message.envelope(), to=request.sid)
     return None
 
 
@@ -157,10 +162,10 @@ def disconnect_user(user_id: int) -> None:
 
 
 def handle_send_message(data: Any) -> dict[str, Any]:
-    """Relay an encrypted, signed envelope to the recipient's room.
+    """Persist an encrypted envelope and relay it when the recipient is online.
 
     Payload: text envelope from main spec §12.
-    Ack: {"ok": True} or {"ok": False, "error": <short reason>}
+    Ack: {"ok": True, "id": <delivery id>} or {"ok": False, "error": <reason>}
 
     SECURITY: this handler contains no decryption path and no key material. It
     checks the shape of the envelope, then forwards the exact bytes it received
@@ -179,17 +184,50 @@ def handle_send_message(data: Any) -> dict[str, Any]:
     if not recipient:
         return {"ok": False, "error": "recipient not found"}
 
-    # Offline recipients are refused until Step 7 adds the pending queue.
     # SECURITY: serialize relay with logout so revoked sockets cannot send or
     # receive after logout has completed.
     with _connections_lock:
         if request.sid not in _connected_users.get(current_user.id, set()):
             return {"ok": False, "error": "unauthorized"}
-        if not _connected_users.get(recipient.id):
-            return {"ok": False, "error": "recipient offline"}
-        emit("message", envelope, to=f"user:{recipient.id}")
+        # SECURITY: count and insert under the same lock in this single-process
+        # threading server, so simultaneous sends cannot bypass the pair cap.
+        try:
+            count = PendingMessage.query.filter_by(sender_id=current_user.id,
+                                                  recipient_id=recipient.id).count()
+            if count >= current_app.config["MAX_PENDING_PER_PAIR"]:
+                return {"ok": False, "error": "queue_full"}
+            message = PendingMessage(sender_id=current_user.id, recipient_id=recipient.id,
+                                     kind=envelope["kind"], ciphertext=envelope["ct"],
+                                     iv=envelope["iv"], ephemeral_public_key=envelope["eph"],
+                                     signature=envelope["sig"], client_ts=envelope["ts"])
+            db.session.add(message)
+            db.session.commit()
+            delivery_id = message.id
+        except SQLAlchemyError:
+            # SECURITY: SQL exceptions can include ciphertext bind parameters.
+            # Return a generic failure without printing the exception/payload.
+            db.session.rollback()
+            return {"ok": False, "error": "storage unavailable"}
+        if _connected_users.get(recipient.id):
+            emit("message", {"id": delivery_id, **envelope}, to=f"user:{recipient.id}")
 
-    return {"ok": True}
+    return {"ok": True, "id": delivery_id}
+
+
+def handle_ack_message(data: Any) -> dict[str, bool]:
+    """Delete only deliveries owned by this authenticated recipient."""
+    if (not current_user.is_authenticated or not isinstance(data, dict)
+            or set(data) != {"id"} or type(data["id"]) is not int
+            or not 0 < data["id"] <= 9_007_199_254_740_991):
+        return {"ok": False}
+    with _connections_lock:
+        if request.sid not in _connected_users.get(current_user.id, set()):
+            return {"ok": False}
+        # SECURITY: ownership is part of the DELETE predicate, not client input.
+        deleted = PendingMessage.query.filter_by(
+            id=data["id"], recipient_id=current_user.id).delete()
+        db.session.commit()
+    return {"ok": bool(deleted)}
 
 
 def register_handlers() -> None:
@@ -199,3 +237,4 @@ def register_handlers() -> None:
     socketio.on_event("connect", handle_connect)
     socketio.on_event("disconnect", handle_disconnect)
     socketio.on_event("send_message", handle_send_message)
+    socketio.on_event("ack_message", handle_ack_message)

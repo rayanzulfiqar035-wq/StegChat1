@@ -27,12 +27,27 @@ const py = `import secrets
 from app import create_app
 from config import Config
 from extensions import socketio
+from extensions import db
+from models import PendingMessage
+from flask import jsonify
+from datetime import datetime, timedelta, timezone
+from cleanup import delete_expired_messages
 import api
 api._write_audit_log=lambda *args: None
 class ReviewConfig(Config):
+ TESTING=True
  SECRET_KEY=secrets.token_hex(32)
  SQLALCHEMY_DATABASE_URI='sqlite:///:memory:'
 app=create_app(ReviewConfig)
+# Inspection hooks exist only in this in-memory test server.
+@app.get('/__test/pending')
+def pending():
+ return jsonify([{'id':m.id,'ct':m.ciphertext,'sig':m.signature} for m in PendingMessage.query.all()])
+@app.get('/__test/expire')
+def expire():
+ for m in PendingMessage.query.all(): m.created_at=datetime.now(timezone.utc)-timedelta(days=8)
+ db.session.commit()
+ return jsonify(deleted=delete_expired_messages())
 # The isolated fixture uses its own exact origin, leaving port 5000 alone.
 socketio.server.eio.cors_allowed_origins=['${base}']
 socketio.run(app,host='127.0.0.1',port=${port},ssl_context=(Config.SSL_CERT,Config.SSL_KEY),allow_unsafe_werkzeug=True,debug=False,use_reloader=False)
@@ -284,6 +299,49 @@ try {
   await navigate(recovery, "/chat");
   await wait(recovery, identityReady);
   check("reload retries the same durable identity after upload failure", recovery.uploads.length === 1 && await evaluate(recovery, "document.getElementById('my-fingerprint').textContent") === savedFingerprint);
+
+  // Step 7: retain a real encrypted offline delivery until rendered and ACKed.
+  const pendingRows = () => evaluate(alice, "fetch('/__test/pending').then(r=>r.json())");
+  await select(alice, "bob");
+  await evaluate(bob, "void e2ee.socket.disconnect()");
+  const offlineEnvelope = await send(alice, "offline queued delivery");
+  let rows = await pendingRows();
+  const offlineRow = rows.find((r) => r.ct === offlineEnvelope.ct);
+  check("offline encrypted message is persisted", !!offlineRow);
+  await evaluate(bob, "void e2ee.socket.connect()");
+  await wait(bob, contains("offline queued delivery"));
+  await wait(alice, `fetch('/__test/pending').then(r=>r.json()).then(rows=>!rows.some(r=>r.id===${offlineRow.id}))`);
+  check("reconnect decrypts, renders and deletes the queued row", true);
+
+  // Simulate a lost ACK, then redeliver the same database row on reconnect.
+  await evaluate(bob, `{
+    const original=e2ee.socket.emit;
+    window.__savedEmit=original;
+    e2ee.socket.emit=function(event,...args){if(event==='ack_message'){args.at(-1)?.(null,{ok:false});return this;}return original.call(this,event,...args);};
+  }`);
+  const lostAckEnvelope = await send(alice, "lost acknowledgment test");
+  await wait(bob, contains("lost acknowledgment test"));
+  rows = await pendingRows();
+  const lostAckRow = rows.find((r) => r.ct === lostAckEnvelope.ct);
+  check("rendered message survives a dropped acknowledgment", !!lostAckRow);
+  await evaluate(bob, "e2ee.socket.emit=window.__savedEmit;e2ee.socket.disconnect();void e2ee.socket.connect()");
+  await wait(alice, `fetch('/__test/pending').then(r=>r.json()).then(rows=>!rows.some(r=>r.id===${lostAckRow.id}))`);
+  check("redelivery is acknowledged again without duplicate rendering", await evaluate(bob, "Array.from(document.querySelectorAll('.message-item--incoming .message-body')).filter(x=>x.textContent==='lost acknowledgment test').length===1"));
+
+  const tampered = { ...offlineEnvelope, ct: Buffer.from(new Uint8Array(Buffer.from(offlineEnvelope.ct,'base64').length)).toString('base64') };
+  const tamperedAck = await emit(alice, tampered);
+  await wait(bob, "document.getElementById('chat-status').textContent.includes('bad signature')");
+  check("tampered delivery is not acknowledged automatically", (await pendingRows()).some(r=>r.id===tamperedAck.id));
+  await evaluate(bob, "document.querySelector('.rejected-delivery button').click()");
+  // Dismiss all rejection notices; each click is a distinct explicit ACK.
+  await evaluate(bob, "document.querySelectorAll('.rejected-delivery button:not(:disabled)').forEach(b=>b.click())");
+  await wait(alice, `fetch('/__test/pending').then(r=>r.json()).then(rows=>!rows.some(r=>r.id===${tamperedAck.id}))`);
+  check("explicit dismiss deletes a rejected delivery", true);
+  await evaluate(bob, "void e2ee.socket.disconnect()");
+  const expireEnvelope = await send(alice, "expiry delivery test");
+  check("expiry removes undelivered ciphertext", (await pendingRows()).some(r=>r.ct===expireEnvelope.ct)
+    && (await evaluate(alice, "fetch('/__test/expire').then(r=>r.json())")).deleted > 0
+    && (await pendingRows()).length===0);
 
   await evaluate(alice, "fetch('/logout',{method:'POST',headers:{'X-CSRFToken':document.querySelector('meta[name=\"csrf-token\"]').content}}).then(r=>r.status)");
   await wait(alice, "!e2ee.socket.connected");

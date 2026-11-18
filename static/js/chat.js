@@ -25,6 +25,41 @@ let sending = false;
 let settingUpIdentity = false;
 let recipientTimer;
 let incomingQueue = Promise.resolve();
+const rejectedDeliveries = new Map();
+
+async function acknowledge(id) {
+  return new Promise((resolve) => {
+    socket.timeout(10000).emit("ack_message", { id }, (error, result) => {
+      resolve(!error && result?.ok === true);
+    });
+  });
+}
+
+function showRejectedDelivery(id) {
+  if (!Number.isSafeInteger(id) || id <= 0 || rejectedDeliveries.has(id)) return;
+  const notice = document.createElement("div");
+  notice.className = "rejected-delivery";
+  const label = document.createElement("p");
+  label.textContent = "A message was rejected and remains pending. You can reconnect to retry it or dismiss it permanently.";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn btn--ghost btn--small";
+  button.textContent = "Dismiss rejected message";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    // SECURITY: rejected content is removed only by this explicit user action.
+    if (await acknowledge(id)) {
+      notice.remove();
+      rejectedDeliveries.delete(id);
+    } else {
+      button.disabled = false;
+      setStatus("Could not confirm dismissal. Reconnect to check pending messages.", "error");
+    }
+  });
+  notice.append(label, button);
+  element("messages-list").appendChild(notice);
+  rejectedDeliveries.set(id, notice);
+}
 
 function setStatus(text, type = "info") {
   element("chat-status").textContent = text;
@@ -244,6 +279,7 @@ socket.on("disconnect", () => { setStatus("Disconnected from chat server", "erro
 socket.on("connect_error", () => { setStatus("Connection failed. Check HTTPS and sign in again.", "error"); updateSendButton(); });
 async function handleIncoming(payload) {
   if (!localIdentity) throw new Error("local identity unavailable");
+  if (!Number.isSafeInteger(payload?.id) || payload.id <= 0) throw new Error("invalid delivery id");
   const env = assertTextEnvelope(payload);
   if (env.recipient !== currentUsername) throw new Error("not for this user");
   // SECURITY: TOFU, signature, timestamp, replay, decrypt, render, record seen.
@@ -252,10 +288,19 @@ async function handleIncoming(payload) {
   await verifyTextSignature(env, await importPeerEcdsa(keys.ecdsa_jwk));
   assertTimestamp(env.ts);
   const hash = `${currentUsername}:${await signatureHash(env.sig)}`;
-  if (await hasSeenSignature(hash)) throw new Error("replayed message");
+  if (await hasSeenSignature(hash)) {
+    // SECURITY: an already rendered delivery can be acknowledged again after
+    // a lost acknowledgment, without decrypting or rendering it twice.
+    await acknowledge(payload.id);
+    setStatus("Duplicate skipped: replayed message");
+    return;
+  }
   const text = await decryptText({ ownEcdhPrivateKey: localIdentity.ecdhPrivateKey, env });
   appendMessage(env.sender, text);
   await markSignatureSeen(hash);
+  rejectedDeliveries.get(payload.id)?.remove();
+  rejectedDeliveries.delete(payload.id);
+  await acknowledge(payload.id);
 }
 socket.on("message", (payload) => {
   // SECURITY: serialize deliveries so duplicates cannot race within this tab.
@@ -265,6 +310,7 @@ socket.on("message", (payload) => {
       const reasons = new Set(["replayed message", "message too old", "timestamp in the future",
         "bad signature", "not for this user", "sender key requires explicit trust"]);
       setStatus(`Message rejected: ${reasons.has(error.message) ? error.message : "validation or decryption failed"}`, "error");
+      showRejectedDelivery(payload?.id);
     }
   });
 });
@@ -300,7 +346,7 @@ element("chat-form").addEventListener("submit", async (event) => {
       });
     });
     if (!ack?.ok) {
-      const reasons = new Set(["recipient offline", "recipient not found", "message too large", "unauthorized"]);
+      const reasons = new Set(["queue_full", "recipient not found", "message too large", "unauthorized"]);
       setStatus(`Message not sent: ${reasons.has(ack?.error) ? ack.error : "server rejected the envelope"}`, "error");
       return;
     }

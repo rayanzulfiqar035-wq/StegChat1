@@ -25,6 +25,7 @@ def account_hash():
 @pytest.fixture
 def app(account_hash, monkeypatch):
     class TestConfig(Config):
+        TESTING = True
         SECRET_KEY = secrets.token_hex(32)
         SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
 
@@ -84,17 +85,18 @@ def sockets(app):
 
 def test_relay_only_to_recipient_and_unchanged(sockets, envelope):
     _, _, alice, bob = sockets
-    assert alice.emit("send_message", envelope, callback=True) == {"ok": True}
+    result = alice.emit("send_message", envelope, callback=True)
+    assert result["ok"] is True and isinstance(result["id"], int)
     messages = bob.get_received()
     assert len(messages) == 1
     assert messages[0]["name"] == "message"
-    assert messages[0]["args"] == envelope
+    assert messages[0]["args"] == {"id": result["id"], **envelope}
     assert alice.get_received() == []
 
 
 @pytest.mark.parametrize("changes", [
     {"v": True}, {"v": 1.0}, {"v": "1"}, {"kind": "stego"},
-    {"sender": "bob"}, {"recipient": "unknown"}, {"recipient": "offline"},
+    {"sender": "bob"}, {"recipient": "unknown"},
     {"recipient": "bob/../alice"}, {"ts": True}, {"ts": 1.5},
     {"ts": 2**53}, {"ts": 0}, {"eph": B64(bytes(65))},
     {"eph": B64(bytes(64))}, {"iv": "!!!!"}, {"iv": B64(bytes(11))},

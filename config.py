@@ -8,6 +8,7 @@ refuses to start without it.
 from __future__ import annotations
 
 import os
+import math
 from datetime import timedelta
 from pathlib import Path
 
@@ -56,6 +57,17 @@ def _env_flag(name: str, default: int) -> int:
     raise ConfigError(f"{name} must be 0 or 1, got {raw!r}.")
 
 
+def _env_days(name: str, default: float) -> float:
+    """Accept positive fractional days for short expiry acceptance checks."""
+    try:
+        value = float(os.environ.get(name, "").strip() or default)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a positive number of days.") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"{name} must be a positive number of days.")
+    return value
+
+
 class Config:
     """Flask configuration object; every attribute is read by `create_app()`."""
 
@@ -70,7 +82,7 @@ class Config:
     SSL_CERT = _env_str("SSL_CERT", "certs/localhost.pem")
     SSL_KEY = _env_str("SSL_KEY", "certs/localhost-key.pem")
 
-    MESSAGE_TTL_DAYS = _env_int("MESSAGE_TTL_DAYS", 7)
+    MESSAGE_TTL_DAYS = _env_days("MESSAGE_TTL_DAYS", 7)
     MAX_TEXT_BYTES = _env_int("MAX_TEXT_BYTES", 16384)
     MAX_STEGO_BYTES = _env_int("MAX_STEGO_BYTES", 3145728)
     MAX_PENDING_PER_PAIR = _env_int("MAX_PENDING_PER_PAIR", 100)

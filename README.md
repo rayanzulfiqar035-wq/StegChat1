@@ -1,6 +1,6 @@
 # Secure E2EE Messenger
 
-A client-server web messaging app for an information-security course project. Implemented through Step 6: browser-generated identity keys, contact fingerprints, and signed end-to-end encrypted text messages over HTTPS/WSS.
+A client-server web messaging app for an information-security course project. Implemented through Step 7: browser-generated identity keys, contact fingerprints, signed encrypted text messages over HTTPS/WSS, and a temporary delivery queue.
 
 ## Run the App
 
@@ -49,14 +49,16 @@ https://localhost:5000
 
 If the browser reports `ERR_CERT_AUTHORITY_INVALID`, install the existing local mkcert CA with `mkcert -install`, then restart the browser. This changes the computer's certificate trust store; do it only on your development computer with authorization. Certificate verification must stay enabled.
 
-## Step 6 behavior
+## Chat and delivery behavior
 
-- Open a normal and a private browser session, register different usernames, and enter each other's exact usernames to chat. Messages to offline users are rejected until Step 7 adds the pending queue.
+- Open a normal and a private browser session, register different usernames, and enter each other's exact usernames to chat. Once a recipient has published keys, messages can be sent while they are offline; ciphertext waits until their browser reconnects.
 - Compare the displayed fingerprints through a separate trusted channel. A changed contact key blocks messages until **Trust new key** is clicked. Ask the sender to resend a message rejected while a replacement key was untrusted.
 - Private keys remain nonextractable in this browser's IndexedDB. If browser data is lost, resetting keys allows new messages; it cannot recover messages encrypted to lost keys.
 - Existing IndexedDB data upgrades automatically. Close other chat tabs if an upgrade is blocked. Older contacts without an account owner require an explicit trust review.
 - Logging out closes all current chat sockets for that account, including other tabs and devices. They must reconnect after signing in.
-- The sender sees **Message sent** after server relay, without implying a recipient rendering receipt. Delivery acknowledgments and stored pending messages start in Step 7.
+- The sender sees **Message sent** after the server stores the envelope. The recipient acknowledges it after verification, decryption and rendering; only then is the queued row deleted. Reconnection delivers the oldest pending messages first, up to 200 per connection, without rendering accepted duplicates twice.
+- Rejected messages remain pending. **Dismiss rejected message** explicitly deletes a rejected delivery; no rejected content is displayed. Reconnect to retry after resolving a key-trust issue.
+- The queue allows 100 pending messages per sender/recipient pair by default; further sends return `queue_full`. Undelivered messages expire after `MESSAGE_TTL_DAYS` (default 7 days). Cleanup runs at startup and hourly. Fractional days such as `0.0007` can be used for expiry testing.
 
 ## Run the checks
 
@@ -68,7 +70,7 @@ python -m bandit app.py api.py auth.py config.py events.py extensions.py models.
 python -m pip check
 ```
 
-For the full HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
+For the full Step 6–7 HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
 
 ```powershell
 node tests/browser_step6.mjs
@@ -85,3 +87,4 @@ console.table(await e2ee.selfTest());
 The local Socket.IO 4.8.1 client retains its upstream license and has a documented local adjustment to use Web Crypto randomness for identifiers and reconnect jitter.
 
 See [Step 6 acceptance results](docs/STEP_06_encryption.checks.md).
+See [Step 7 acceptance results](docs/STEP_07_pending_queue.checks.md).

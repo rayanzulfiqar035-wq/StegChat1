@@ -1,7 +1,6 @@
 """ORM models for the secure chat application.
 
-Only the `User` model exists in Step 2.  `PendingMessage` and `LoginAttempt`
-are added in later steps.  All columns are defined exactly as in
+Users and temporary encrypted deliveries. All columns are defined as in
 docs/PROJECT_MAIN.md section 9.
 """
 
@@ -50,3 +49,31 @@ class User(UserMixin, db.Model):
 
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username!r}>"
+
+
+class PendingMessage(db.Model):
+    """Ciphertext retained until recipient acknowledgment or expiry."""
+
+    __tablename__ = "pending_messages"
+    # SECURITY: never reuse a deleted delivery ID for a later message.
+    __table_args__ = {"sqlite_autoincrement": True}
+    id: db.Mapped[int] = db.mapped_column(primary_key=True)
+    sender_id: db.Mapped[int] = db.mapped_column(db.ForeignKey("users.id"), nullable=False)
+    recipient_id: db.Mapped[int] = db.mapped_column(db.ForeignKey("users.id"), nullable=False, index=True)
+    kind: db.Mapped[str] = db.mapped_column(db.String(16), nullable=False)
+    ciphertext: db.Mapped[str] = db.mapped_column(db.Text, nullable=False)
+    iv: db.Mapped[str | None] = db.mapped_column(db.Text, nullable=True)
+    ephemeral_public_key: db.Mapped[str] = db.mapped_column(db.Text, nullable=False)
+    signature: db.Mapped[str] = db.mapped_column(db.Text, nullable=False)
+    client_ts: db.Mapped[int] = db.mapped_column(db.BigInteger, nullable=False)
+    created_at: db.Mapped[datetime] = db.mapped_column(
+        db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    sender = db.relationship(User, foreign_keys=[sender_id], lazy="joined")
+    recipient = db.relationship(User, foreign_keys=[recipient_id], lazy="joined")
+
+    def envelope(self) -> dict:
+        """Rebuild the original signed fields without modifying their encoding."""
+        return {"id": self.id, "v": 1, "kind": self.kind,
+                "sender": self.sender.username, "recipient": self.recipient.username,
+                "ts": self.client_ts, "eph": self.ephemeral_public_key,
+                "iv": self.iv, "ct": self.ciphertext, "sig": self.signature}
