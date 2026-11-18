@@ -21,6 +21,8 @@ import binascii
 import json
 import re
 from threading import RLock
+from collections import deque
+from time import monotonic
 from typing import Any
 
 from flask import current_app, request
@@ -30,11 +32,38 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from extensions import db, socketio
 from models import PendingMessage, User
+from audit import audit_event
 
 # In-memory tracking of active connections per user ID.
 # Maps user_id -> set of active Socket.IO session IDs (sids).
 _connected_users: dict[int, set[str]] = {}
 _connections_lock = RLock()
+
+
+def _send_rate_allowed(user_id):
+    """Sliding-minute counter shared by this user's tabs and reconnects."""
+    if not current_app.config["SOCKET_RATE_LIMIT_ENABLED"]:
+        return True
+    with _connections_lock:
+        counters = current_app.extensions.setdefault("socket_send_rates", {})
+        now = monotonic()
+        # SECURITY: remove idle entries to keep the in-memory limiter bounded.
+        for uid in list(counters):
+            if counters[uid][-1] <= now - 60:
+                del counters[uid]
+        events = counters.setdefault(user_id, deque())
+        while events and events[0] <= now - 60:
+            events.popleft()
+        if len(events) >= 30:
+            return False
+        events.append(now)
+        return True
+
+
+def reject_message(reason):
+    """Audit a fixed rejection reason without recording envelope content."""
+    audit_event("message_rejected", reason=reason)
+    return {"ok": False, "error": reason}
 
 # §12 envelope: version 1, text kind only until Step 9 adds `stego`.
 _ENVELOPE_VERSION = 1
@@ -172,30 +201,34 @@ def handle_send_message(data: Any) -> dict[str, Any]:
     so the recipient's signature check covers what was actually sent.
     """
     if not current_user.is_authenticated:
-        return {"ok": False, "error": "unauthorized"}
+        return reject_message("unauthorized")
+
+    if not _send_rate_allowed(current_user.id):
+        audit_event("rate_limit", current_user.username, reason="socket")
+        return {"ok": False, "error": "rate_limited"}
 
     try:
         envelope = _validate_envelope(data, current_user.username)
     except EnvelopeError as exc:
-        return {"ok": False, "error": str(exc)}
+        return reject_message(str(exc))
 
     # Look up recipient by exact (already normalised) username.
     recipient = User.query.filter_by(username=envelope["recipient"]).first()
     if not recipient:
-        return {"ok": False, "error": "recipient not found"}
+        return reject_message("recipient not found")
 
     # SECURITY: serialize relay with logout so revoked sockets cannot send or
     # receive after logout has completed.
     with _connections_lock:
         if request.sid not in _connected_users.get(current_user.id, set()):
-            return {"ok": False, "error": "unauthorized"}
+            return reject_message("unauthorized")
         # SECURITY: count and insert under the same lock in this single-process
         # threading server, so simultaneous sends cannot bypass the pair cap.
         try:
             count = PendingMessage.query.filter_by(sender_id=current_user.id,
                                                   recipient_id=recipient.id).count()
             if count >= current_app.config["MAX_PENDING_PER_PAIR"]:
-                return {"ok": False, "error": "queue_full"}
+                return reject_message("queue_full")
             message = PendingMessage(sender_id=current_user.id, recipient_id=recipient.id,
                                      kind=envelope["kind"], ciphertext=envelope["ct"],
                                      iv=envelope["iv"], ephemeral_public_key=envelope["eph"],
@@ -207,7 +240,7 @@ def handle_send_message(data: Any) -> dict[str, Any]:
             # SECURITY: SQL exceptions can include ciphertext bind parameters.
             # Return a generic failure without printing the exception/payload.
             db.session.rollback()
-            return {"ok": False, "error": "storage unavailable"}
+            return reject_message("storage unavailable")
         if _connected_users.get(recipient.id):
             emit("message", {"id": delivery_id, **envelope}, to=f"user:{recipient.id}")
 
@@ -238,3 +271,10 @@ def register_handlers() -> None:
     socketio.on_event("disconnect", handle_disconnect)
     socketio.on_event("send_message", handle_send_message)
     socketio.on_event("ack_message", handle_ack_message)
+
+    @socketio.on_error_default
+    def handle_socket_error(error):
+        """Prevent event exceptions from logging payloads or tracebacks."""
+        db.session.rollback()
+        audit_event("server_error")
+        return {"ok": False, "error": "server error"}

@@ -10,6 +10,8 @@ from flask_login import LoginManager
 from flask_socketio import SocketIO
 from flask_sqlalchemy import SQLAlchemy
 from flask_wtf.csrf import CSRFProtect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlite3 import Connection as SQLiteConnection
@@ -37,6 +39,9 @@ login_manager.session_protection = "strong"
 # SECURITY: CSRFProtect rejects state-changing requests that lack a valid token,
 # which stops a third-party page from driving this app with the victim's cookie.
 csrf = CSRFProtect()
+
+# SECURITY: trust the actual connection address, not forwarded request headers.
+limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
 
 # Threading mode with simple-websocket: no eventlet/gevent monkey patching.
 # SECURITY: restrict WebSocket origins to exact app HTTPS origins (§11).

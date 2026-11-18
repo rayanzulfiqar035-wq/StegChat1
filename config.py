@@ -91,6 +91,10 @@ class Config:
     PERMANENT_SESSION_LIFETIME = timedelta(minutes=SESSION_MINUTES)
 
     STEGO_LAB = bool(_env_flag("STEGO_LAB", 0))
+    AUDIT_LOG_PATH = str(BASE_DIR / "logs" / "audit.log")
+    RATELIMIT_STORAGE_URI = "memory://"
+    RATELIMIT_ENABLED = True
+    SOCKET_RATE_LIMIT_ENABLED = True
 
     # SECURITY: the session cookie is never readable by JavaScript and is not
     # sent with cross-site requests (no CSRF-by-cookie-relay).

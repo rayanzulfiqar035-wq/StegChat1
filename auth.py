@@ -14,6 +14,8 @@ Security notes are inline with ``# SECURITY:`` markers.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
+from threading import RLock
 from urllib.parse import urlsplit
 
 from argon2 import PasswordHasher
@@ -32,8 +34,9 @@ from flask_wtf import FlaskForm
 from wtforms import PasswordField, StringField, SubmitField
 from wtforms.validators import DataRequired, EqualTo, Length, Regexp, ValidationError
 
-from extensions import db
-from models import User
+from extensions import db, limiter
+from models import LoginAttempt, User
+from audit import audit_event
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -47,6 +50,50 @@ _ph = PasswordHasher()
 _DUMMY_HASH: str = _ph.hash("dummy-password-to-prevent-timing-attack")
 
 _USERNAME_RE = re.compile(r"^[a-z0-9_]{3,32}$")
+_login_lock = RLock()
+
+
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def account_locked(username, now):
+    """The fifth failure starts a full 15-minute lock, not a sliding reset."""
+    latest = LoginAttempt.query.filter_by(username=username, success=False).order_by(
+        LoginAttempt.created_at.desc(), LoginAttempt.id.desc()).limit(5).all()
+    if len(latest) < 5:
+        return False
+    newest = latest[0].created_at.replace(tzinfo=timezone.utc)
+    oldest = latest[-1].created_at.replace(tzinfo=timezone.utc)
+    return newest - oldest <= timedelta(minutes=15) and now < newest + timedelta(minutes=15)
+
+
+def authenticate(username, password):
+    """Serialize lockout checks and verification to enforce the account cap."""
+    with _login_lock:
+        locked = account_locked(username, _utc_now())
+        user = User.query.filter_by(username=username).first()
+        valid = False
+        try:
+            # SECURITY: perform full verification even for missing/locked users.
+            _ph.verify(user.password_hash if user else _DUMMY_HASH, password)
+            valid = user is not None
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            pass
+        if locked:
+            # Do not extend the lock window by recording blocked requests.
+            audit_event("lockout", username)
+            audit_event("login_failure", username)
+            return None
+        db.session.add(LoginAttempt(username=username, ip=request.remote_addr or "unknown",
+                                    success=valid, created_at=_utc_now()))
+        if valid and _ph.check_needs_rehash(user.password_hash):
+            user.password_hash = _ph.hash(password)
+        db.session.commit()
+        audit_event("login_success" if valid else "login_failure", username)
+        if not valid and account_locked(username, _utc_now()):
+            audit_event("lockout", username)
+        return user if valid else None
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +141,8 @@ class RegisterForm(FlaskForm):
 class LoginForm(FlaskForm):
     """Login form with username and password."""
 
-    username = StringField("Username", validators=[DataRequired(), Length(max=32)])
+    username = StringField("Username", validators=[DataRequired(), Length(min=3, max=32),
+                          Regexp(r"^[A-Za-z0-9_]{3,32}$")])
     password = PasswordField("Password", validators=[DataRequired()])
     submit = SubmitField("Log in")
 
@@ -106,6 +154,7 @@ class LoginForm(FlaskForm):
 
 @auth_bp.get("/register")
 @auth_bp.post("/register")
+@limiter.limit("10 per hour", methods=["POST"])
 def register() -> str:
     """Show or process the registration form.
 
@@ -126,6 +175,7 @@ def register() -> str:
         user = User(username=username, password_hash=password_hash)
         db.session.add(user)
         db.session.commit()
+        audit_event("registration", username)
 
         flash("Account created. Please log in.", "success")
         return redirect(url_for("auth.login"))
@@ -135,6 +185,7 @@ def register() -> str:
 
 @auth_bp.get("/login")
 @auth_bp.post("/login")
+@limiter.limit("5 per minute", methods=["POST"])
 def login() -> str:
     """Show or process the login form.
 
@@ -148,25 +199,8 @@ def login() -> str:
     form = LoginForm()
     if form.validate_on_submit():
         username = form.username.data.strip().lower()
-        user = User.query.filter_by(username=username).first()
-
-        # SECURITY: always run a hash verification to keep timing constant.
-        # For an unknown user we verify against a pre-computed dummy hash
-        # (which always fails) so the work load is the same as for a real user.
-        hash_to_verify = user.password_hash if user else _DUMMY_HASH
-        password_ok = False
-        try:
-            _ph.verify(hash_to_verify, form.password.data)
-            password_ok = True
-        except (VerifyMismatchError, VerificationError, InvalidHashError):
-            pass
-
-        if user and password_ok:
-            # SECURITY: rehash transparently if Argon2 parameters have changed.
-            if _ph.check_needs_rehash(user.password_hash):
-                user.password_hash = _ph.hash(form.password.data)
-                db.session.commit()
-
+        user = authenticate(username, form.password.data)
+        if user:
             # Mark the session permanent so PERMANENT_SESSION_LIFETIME applies.
             session.permanent = True
             login_user(user)
@@ -203,6 +237,7 @@ def logout() -> str:
     from events import disconnect_user  # deferred to avoid import cycles
 
     disconnect_user(current_user.id)
+    audit_event("logout", current_user.username)
     logout_user()
     flash("You have been logged out.", "success")
     return redirect(url_for("auth.login"))

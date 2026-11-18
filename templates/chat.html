@@ -57,6 +57,7 @@
   <div id="chat-status" class="chat-status" role="status" aria-live="polite"></div>
 
   <form id="chat-form" class="chat-form" novalidate>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input
       type="text"
       id="message-input"

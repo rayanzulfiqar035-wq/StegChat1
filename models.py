@@ -77,3 +77,14 @@ class PendingMessage(db.Model):
                 "sender": self.sender.username, "recipient": self.recipient.username,
                 "ts": self.client_ts, "eph": self.ephemeral_public_key,
                 "iv": self.iv, "ct": self.ciphertext, "sig": self.signature}
+
+
+class LoginAttempt(db.Model):
+    """Account lockout metadata; never passwords or password hashes."""
+    __tablename__ = "login_attempts"
+    id: db.Mapped[int] = db.mapped_column(primary_key=True)
+    username: db.Mapped[str] = db.mapped_column(db.String(32), nullable=False, index=True)
+    ip: db.Mapped[str] = db.mapped_column(db.String(45), nullable=False)
+    success: db.Mapped[bool] = db.mapped_column(nullable=False)
+    created_at: db.Mapped[datetime] = db.mapped_column(
+        db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))

@@ -20,16 +20,14 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import logging
 import re
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, jsonify, request
 from flask_login import current_user, login_required
 
-from extensions import db
+from audit import audit_event
+from extensions import db, limiter
 from models import User
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
@@ -38,34 +36,8 @@ _ALLOWED_JWK_KEYS = frozenset({"kty", "crv", "x", "y"})
 
 
 def _write_audit_log(event: str, username: str) -> None:
-    """Write a non-secret audit line for key-management events.
-
-    This uses the standard library logging system and rotates the file to keep
-    the audit trail bounded, without ever recording keys, ciphertext, hashes or
-    other sensitive data.
-    """
-    try:
-        log_dir = Path(__file__).resolve().parent / "logs"
-        log_dir.mkdir(exist_ok=True)
-
-        logger = logging.getLogger("secure_chat.audit")
-        if not logger.handlers:
-            handler = RotatingFileHandler(
-                log_dir / "audit.log",
-                maxBytes=1_048_576,
-                backupCount=3,
-                encoding="utf-8",
-            )
-            handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-            logger.addHandler(handler)
-            logger.setLevel(logging.INFO)
-            logger.propagate = False
-
-        logger.info("event=%s username=%s", event, username)
-    except OSError:
-        # The audit log is a security aid; a write failure must not block key
-        # upload/reset operations or leak secrets in an exception response.
-        pass
+    """Use the shared allowlisted audit trail for key management."""
+    audit_event(event, username)
 
 
 def _validate_ec_public_jwk(jwk: Any) -> dict[str, str]:
@@ -84,13 +56,13 @@ def _validate_ec_public_jwk(jwk: Any) -> dict[str, str]:
         raise ValueError("Private key member 'd' must never be uploaded")
 
     if keys != _ALLOWED_JWK_KEYS:
-        raise ValueError(f"JWK must contain exactly {sorted(_ALLOWED_JWK_KEYS)}, got {sorted(keys)}")
+        raise ValueError("JWK must contain exactly kty, crv, x, y")
 
     if jwk.get("kty") != "EC":
-        raise ValueError(f"Expected kty='EC', got {jwk.get('kty')!r}")
+        raise ValueError("Expected kty='EC'")
 
     if jwk.get("crv") != "P-256":
-        raise ValueError(f"Expected crv='P-256', got {jwk.get('crv')!r}")
+        raise ValueError("Expected crv='P-256'")
 
     for coord in ("x", "y"):
         val = jwk.get(coord)
@@ -127,6 +99,7 @@ def get_me() -> Any:
 
 
 @api_bp.post("/keys")
+@limiter.shared_limit("10 per hour", scope="key_management", methods=["POST", "PUT"])
 @login_required
 def post_keys() -> Any:
     """Upload initial public keys.
@@ -158,6 +131,7 @@ def post_keys() -> Any:
 
 
 @api_bp.put("/keys")
+@limiter.shared_limit("10 per hour", scope="key_management", methods=["POST", "PUT"])
 @login_required
 def put_keys() -> Any:
     """Replace public keys (explicit key reset)."""
@@ -183,6 +157,7 @@ def put_keys() -> Any:
 
 
 @api_bp.get("/users/<username>/keys")
+@limiter.limit("30 per minute")
 @login_required
 def get_user_keys(username: str) -> Any:
     """Fetch the public keys for a specific user.
@@ -190,6 +165,8 @@ def get_user_keys(username: str) -> Any:
     Returns 404 if the user is unknown or has not uploaded keys.
     """
     normalised = username.strip().lower()
+    if not re.fullmatch(r"[a-z0-9_]{3,32}", normalised):
+        return jsonify({"error": "user not found"}), 404
     user = User.query.filter_by(username=normalised).first()
     if not user:
         return jsonify({"error": "user not found"}), 404

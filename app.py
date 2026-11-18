@@ -13,9 +13,11 @@ from pathlib import Path
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 from flask_wtf.csrf import CSRFError
 from werkzeug.exceptions import HTTPException
+from flask_talisman import Talisman
 
 from config import Config, ConfigError
-from extensions import csrf, db, login_manager, socketio
+from extensions import csrf, db, limiter, login_manager, socketio
+from audit import audit_event, init_audit
 
 
 def create_app(config_class: type[Config] = Config) -> Flask:
@@ -33,18 +35,46 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     # SECURITY: never leave the interactive debugger enabled - it exposes an
     # arbitrary-code console and must not be switched on in this codebase.
     app.config["DEBUG"] = False
+    init_audit(app)
+    # SECURITY: fixed self-only policy; no inline/eval, wildcard or CDN sources.
+    Talisman(app, force_https=True, strict_transport_security_max_age=3600,
+             strict_transport_security_include_subdomains=False,
+             # SECURITY: strict-origin retains the same-origin Referer required
+             # by Flask-WTF's HTTPS CSRF check without disclosing URL paths.
+             frame_options="DENY", referrer_policy="strict-origin",
+             content_security_policy={
+                 "default-src": "'self'", "script-src": "'self'", "style-src": "'self'",
+                 "img-src": "'self' blob: data:",
+                 "connect-src": "'self' wss://localhost:5000 wss://127.0.0.1:5000",
+                 "frame-ancestors": "'none'", "base-uri": "'self'", "form-action": "'self'"})
 
     db.init_app(app)
     login_manager.init_app(app)
     csrf.init_app(app)
+    limiter.init_app(app)
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException):
-        """Keep API failures JSON, including CSRF and oversized requests."""
+        """Return generic errors without reflecting request or exception text."""
+        messages = {400: "Bad request", 403: "Forbidden", 404: "Not found",
+                    429: "Too many requests", 500: "Internal server error"}
+        if error.code == 429:
+            audit_event("rate_limit", reason="http")
+        if isinstance(error, CSRFError):
+            audit_event("request_rejected", reason="csrf")
+        message = messages.get(error.code, error.name)
         if request.path.startswith("/api/"):
-            message = "CSRF validation failed" if isinstance(error, CSRFError) else error.name
             return jsonify({"error": message}), error.code
-        return error
+        return render_template("error.html", message=message), error.code
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(error):
+        """Suppress traces and SQL bind parameters in both responses and logs."""
+        db.session.rollback()
+        audit_event("server_error")
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Internal server error"}), 500
+        return render_template("error.html", message="Internal server error"), 500
     # SECURITY: restrict WebSocket connections to exact app HTTPS origins (§11).
     # Cross-origin WebSocket requests are rejected automatically.
     socketio.init_app(

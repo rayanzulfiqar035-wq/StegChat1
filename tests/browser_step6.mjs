@@ -1,4 +1,4 @@
-/** Step 6 acceptance checks using installed Chrome and Node, no npm packages.
+/** Step 6–8 browser acceptance checks using installed Chrome and Node.
  * Starts an isolated in-memory HTTPS app; never opens the user's real database.
  */
 import assert from "node:assert/strict";
@@ -29,17 +29,21 @@ from config import Config
 from extensions import socketio
 from extensions import db
 from models import PendingMessage
-from flask import jsonify
+from flask import jsonify, render_template_string
 from datetime import datetime, timedelta, timezone
 from cleanup import delete_expired_messages
-import api
-api._write_audit_log=lambda *args: None
 class ReviewConfig(Config):
  TESTING=True
+ RATELIMIT_ENABLED=False
+ SOCKET_RATE_LIMIT_ENABLED=False
+ AUDIT_LOG_PATH=__import__('os').environ['STEP_TEST_AUDIT_PATH']
  SECRET_KEY=secrets.token_hex(32)
  SQLALCHEMY_DATABASE_URI='sqlite:///:memory:'
 app=create_app(ReviewConfig)
 # Inspection hooks exist only in this in-memory test server.
+@app.get('/__test/csp-experiment')
+def csp_experiment():
+ return render_template_string('''<!doctype html><meta name="csrf-token" content="test"><script>window.__inlineExecuted=true;</script><p>CSP experiment</p>''')
 @app.get('/__test/pending')
 def pending():
  return jsonify([{'id':m.id,'ct':m.ciphertext,'sig':m.signature} for m in PendingMessage.query.all()])
@@ -68,8 +72,10 @@ try {
     request.on("error", reject);
     request.setTimeout(1000, () => request.destroy());
   });
+  const auditDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "stegchat-test-audit-"));
   server = spawn(path.join(root, "venv/Scripts/python.exe"), ["-B", "-c", py], {
     cwd: root, windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+    env: { ...process.env, STEP_TEST_AUDIT_PATH: path.join(auditDirectory, "audit.log") },
   });
   let serverErrors = "";
   server.stderr.on("data", (data) => { serverErrors += data.toString(); });
@@ -347,6 +353,24 @@ try {
   await wait(alice, "!e2ee.socket.connected");
   check("HTTP logout disconnects the live browser socket", await evaluate(alice, "fetch('/api/me').then(r=>r.status)") === 401);
   check("no uncaught browser script errors", [...sessions.values()].every((p) => p.errors.length === 0));
+  const cspPage = await page(`document.addEventListener('securitypolicyviolation', event => {
+    (window.__cspViolations ||= []).push(event.violatedDirective);
+  });`);
+  await navigate(cspPage, '/__test/csp-experiment');
+  await wait(cspPage, 'window.__cspViolations?.length > 0');
+  check('strict CSP blocks an inline script in a rendered test template', await evaluate(cspPage,
+    "window.__inlineExecuted!==true && window.__cspViolations.some(d=>d.startsWith('script-src'))"));
+  const headers = await new Promise((resolve, reject) => {
+    https.get(base + '/login', { ca }, response => { response.resume(); resolve(response.headers); }).on('error', reject);
+  });
+  check('real HTTPS responses include CSP, HSTS and nosniff',
+    headers['content-security-policy']?.includes("script-src 'self'")
+    && headers['strict-transport-security']==='max-age=3600'
+    && headers['x-content-type-options']==='nosniff');
+  const audit = await fs.readFile(path.join(auditDirectory, 'audit.log'), 'utf8');
+  check('browser audit contains account and key events without message content',
+    ['registration','login_success','keys_uploaded','keys_reset','logout'].every(event=>audit.includes('event='+event))
+    && !audit.includes('browser-test-password-123') && !audit.includes(first.ct) && !audit.includes(text));
   console.log(`Browser acceptance: ${passed} passed, ${failures.length} failed`);
   if (failures.length) process.exitCode = 1;
 } catch (error) {

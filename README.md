@@ -1,6 +1,6 @@
 # Secure E2EE Messenger
 
-A client-server web messaging app for an information-security course project. Implemented through Step 7: browser-generated identity keys, contact fingerprints, signed encrypted text messages over HTTPS/WSS, and a temporary delivery queue.
+A client-server web messaging app for an information-security course project. Implemented through Step 8: browser identity keys, signed encrypted text over HTTPS/WSS, a temporary delivery queue, and web security hardening.
 
 ## Run the App
 
@@ -66,11 +66,11 @@ Activate the virtual environment, then run:
 
 ```powershell
 python -m pytest -q
-python -m bandit app.py api.py auth.py config.py events.py extensions.py models.py -q
+python -m bandit app.py api.py auth.py config.py events.py extensions.py models.py cleanup.py audit.py -q
 python -m pip check
 ```
 
-For the full Step 6–7 HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
+For the Step 6-8 HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
 
 ```powershell
 node tests/browser_step6.mjs
@@ -88,3 +88,17 @@ The local Socket.IO 4.8.1 client retains its upstream license and has a document
 
 See [Step 6 acceptance results](docs/STEP_06_encryption.checks.md).
 See [Step 7 acceptance results](docs/STEP_07_pending_queue.checks.md).
+
+See [Step 8 acceptance results](docs/STEP_08_hardening.checks.md).
+
+## Security hardening
+
+The app forces HTTPS and sends a strict Content Security Policy, `nosniff`, frame protection, a one-hour development HSTS policy, and a strict-origin referrer policy. Scripts and styles are served locally; inline scripts and styles are blocked.
+
+HTTP limits are keyed by the connection IP: login submissions 5/minute, registration submissions 10/hour, public-key lookups 30/minute across usernames, and key upload/reset 10/hour combined. Message sends are limited to 30/minute per user across tabs and reconnects. HTTP limits return 429; excess socket sends return `rate_limited`.
+
+Five wrong passwords for a username within 15 minutes start a full 15-minute lock from the fifth failure. Blocked requests keep the generic login error and do not extend the lock. Login-attempt metadata is stored in SQLite, so the account lock survives server restarts. The in-memory HTTP/socket counters reset on restart, as intended for the single-process development server.
+
+Security events rotate in `logs/audit.log` (1 MiB per file, three backups). Events include account/key activity, lockouts, rate-limit hits, and rejection reasons. Passwords, hashes, key values, ciphertext and message text are excluded. Error pages and socket errors return generic messages.
+
+Tests for earlier steps explicitly disable rate counters when exercising large queues; `tests/test_step8.py` checks the actual enabled HTTP/socket limits. The browser suite keeps CSP and other headers active and verifies inline-script blocking in a temporary test-only page.

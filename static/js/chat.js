@@ -346,7 +346,7 @@ element("chat-form").addEventListener("submit", async (event) => {
       });
     });
     if (!ack?.ok) {
-      const reasons = new Set(["queue_full", "recipient not found", "message too large", "unauthorized"]);
+      const reasons = new Set(["queue_full", "rate_limited", "recipient not found", "message too large", "unauthorized"]);
       setStatus(`Message not sent: ${reasons.has(ack?.error) ? ack.error : "server rejected the envelope"}`, "error");
       return;
     }

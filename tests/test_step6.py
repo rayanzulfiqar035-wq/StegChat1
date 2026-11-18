@@ -23,9 +23,12 @@ def account_hash():
 
 
 @pytest.fixture
-def app(account_hash, monkeypatch):
+def app(account_hash, monkeypatch, tmp_path):
     class TestConfig(Config):
         TESTING = True
+        RATELIMIT_ENABLED = False
+        SOCKET_RATE_LIMIT_ENABLED = False
+        AUDIT_LOG_PATH = str(tmp_path / "audit.log")
         SECRET_KEY = secrets.token_hex(32)
         SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
 
