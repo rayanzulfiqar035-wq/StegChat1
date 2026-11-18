@@ -1,0 +1,217 @@
+"""Application factory and development entry point for the secure chat server.
+
+Step 1 built the skeleton; Step 2 adds accounts (register, login, logout).
+Later steps plug in additional blueprints and Socket.IO handlers without
+touching this wiring.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask_login import login_required
+from flask_wtf.csrf import CSRFError
+from werkzeug.exceptions import HTTPException
+from flask_talisman import Talisman
+
+from config import Config, ConfigError
+from extensions import csrf, db, limiter, login_manager, socketio
+from audit import audit_event, init_audit
+
+
+def create_app(config_class: type[Config] = Config) -> Flask:
+    """Build and configure the Flask application.
+
+    Raises `ConfigError` when required configuration (notably `SECRET_KEY`) is
+    missing, so the process fails closed instead of booting half-configured.
+    """
+    # SECURITY: fail fast on missing configuration before anything is served.
+    config_class.validate()
+
+    app = Flask(__name__)
+    app.config.from_object(config_class)
+
+    # SECURITY: never leave the interactive debugger enabled - it exposes an
+    # arbitrary-code console and must not be switched on in this codebase.
+    app.config["DEBUG"] = False
+    init_audit(app)
+    # SECURITY: fixed self-only policy; no inline/eval, wildcard or CDN sources.
+    Talisman(app, force_https=True, strict_transport_security_max_age=3600,
+             strict_transport_security_include_subdomains=False,
+             # SECURITY: strict-origin retains the same-origin Referer required
+             # by Flask-WTF's HTTPS CSRF check without disclosing URL paths.
+             frame_options="DENY", referrer_policy="strict-origin",
+             content_security_policy={
+                 "default-src": "'self'", "script-src": "'self'", "style-src": "'self'",
+                 "img-src": "'self' blob: data:",
+                 "connect-src": "'self' wss://localhost:5000 wss://127.0.0.1:5000",
+                 "frame-ancestors": "'none'", "base-uri": "'self'", "form-action": "'self'"})
+
+    db.init_app(app)
+    login_manager.init_app(app)
+    csrf.init_app(app)
+    limiter.init_app(app)
+
+    @app.errorhandler(HTTPException)
+    def handle_http_error(error: HTTPException):
+        """Return generic errors without reflecting request or exception text."""
+        messages = {400: "Bad request", 403: "Forbidden", 404: "Not found",
+                    429: "Too many requests", 500: "Internal server error"}
+        if error.code == 429:
+            audit_event("rate_limit", reason="http")
+        if isinstance(error, CSRFError):
+            audit_event("request_rejected", reason="csrf")
+        message = messages.get(error.code, error.name)
+        if request.path.startswith("/api/"):
+            return jsonify({"error": message}), error.code
+        return render_template("error.html", message=message), error.code
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(error):
+        """Suppress traces and SQL bind parameters in both responses and logs."""
+        db.session.rollback()
+        audit_event("server_error")
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Internal server error"}), 500
+        return render_template("error.html", message="Internal server error"), 500
+    # SECURITY: restrict WebSocket connections to exact app HTTPS origins (§11).
+    # Cross-origin WebSocket requests are rejected automatically.
+    socketio.init_app(
+        app,
+        cors_allowed_origins=["https://localhost:5000", "https://127.0.0.1:5000"],
+        max_http_buffer_size=max(5_000_000, 4 * ((app.config["MAX_STEGO_BYTES"] + 2) // 3) + 65536),
+    )
+
+    # Register blueprints.
+    from auth import auth_bp  # noqa: PLC0415 — deferred to avoid circular import
+    from api import api_bp    # noqa: PLC0415
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(api_bp)
+
+    # Register Socket.IO event handlers.
+    import events  # noqa: F401, PLC0415
+    events.register_handlers()
+
+    # Create all database tables (SQLite file lives under instance/).
+    with app.app_context():
+        db.create_all()
+        from cleanup import delete_expired_messages
+        delete_expired_messages()
+
+    _register_user_loader()
+    _register_login_manager(app)
+    _register_routes(app)
+    if not app.testing:
+        from cleanup import start_cleanup_task
+        app.extensions["message_cleanup_task"] = start_cleanup_task(app)
+    return app
+
+
+def _register_user_loader() -> None:
+    """Register the Flask-Login user loader that reads `User` from the DB."""
+    from models import User  # noqa: PLC0415
+
+    @login_manager.user_loader
+    def load_user(user_id: str) -> "User | None":
+        # SECURITY: query by integer primary key only; never by username or
+        # any user-supplied string to prevent injection via the session cookie.
+        try:
+            uid = int(user_id)
+        except (ValueError, TypeError):
+            return None
+        return db.session.get(User, uid)
+
+
+def _register_login_manager(app: Flask) -> None:
+    """Configure Flask-Login behaviour for unauthenticated requests."""
+    # Redirect unauthenticated users to /login with a neutral flash message.
+    login_manager.login_view = "auth.login"  # type: ignore[assignment]
+    # SECURITY: "strong" session protection regenerates the session on
+    # IP or user-agent change, limiting session-fixation and hijacking risk.
+    login_manager.session_protection = "strong"
+
+    @login_manager.unauthorized_handler
+    def unauthorized():
+        """Use JSON for API callers and a login redirect for HTML pages."""
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "authentication required"}), 401
+        return redirect(url_for("auth.login", next=request.path))
+
+
+def _register_routes(app: Flask) -> None:
+    """Register entry and authenticated steganography presentation pages."""
+
+    @app.get("/")
+    def index():
+        """Open sign-in directly; the existing login view handles signed-in users."""
+        return redirect(url_for("auth.login"))
+
+    @app.get("/stego")
+    @login_required
+    def stego():
+        """Choose the carrier for a steganographic message."""
+        return render_template("stego.html")
+
+    @app.get("/stego/image")
+    @login_required
+    def stego_image():
+        """Use the existing encrypted chat client with a required PNG cover."""
+        return render_template("chat.html", stego_mode=True)
+
+    @app.get("/stego/audio")
+    @login_required
+    def stego_audio():
+        """Show the audio placeholder without enabling uploads or sending."""
+        return render_template("stego_placeholder.html", transport="Audio",
+                               transport_icon="audio", file_accept="audio/*")
+
+    @app.get("/stego/text")
+    @login_required
+    def stego_text():
+        """Show the text placeholder without enabling uploads or sending."""
+        return render_template("stego_placeholder.html", transport="Text",
+                               transport_icon="text", file_accept="text/plain")
+
+    if app.config["STEGO_LAB"]:
+        @app.get("/stego-lab")
+        @login_required
+        def stego_lab() -> str:
+            """Serve the opt-in browser-only steganography laboratory."""
+            return render_template("stego_lab.html")
+
+
+def main() -> int:
+    """Start the development server on the loopback interface only over HTTPS."""
+    try:
+        app = create_app()
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 1
+
+    base_dir = Path(__file__).resolve().parent
+    cert_path = Path(app.config["SSL_CERT"])
+    if not cert_path.is_absolute():
+        cert_path = base_dir / cert_path
+
+    key_path = Path(app.config["SSL_KEY"])
+    if not key_path.is_absolute():
+        key_path = base_dir / key_path
+
+    # SECURITY: bound to 127.0.0.1 and HTTPS only so plain-HTTP traffic is rejected
+    # and development server is never reachable from the local network.
+    socketio.run(
+        app,
+        host="127.0.0.1",
+        port=5000,
+        ssl_context=(str(cert_path), str(key_path)),
+        allow_unsafe_werkzeug=True,
+        debug=False,
+        use_reloader=False,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
