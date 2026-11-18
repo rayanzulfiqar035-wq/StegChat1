@@ -17,6 +17,9 @@
     <nav class="site-nav" aria-label="Main">
       {% if current_user.is_authenticated %}
         <a href="{{ url_for('auth.chat_placeholder') }}">Chat</a>
+        {% if config.STEGO_LAB %}
+          <a href="{{ url_for('stego_lab') }}">Stego lab</a>
+        {% endif %}
         <form method="post" action="{{ url_for('auth.logout') }}" class="nav-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button type="submit" class="nav-btn">Log out</button>

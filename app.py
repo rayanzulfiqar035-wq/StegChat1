@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask_login import login_required
 from flask_wtf.csrf import CSRFError
 from werkzeug.exceptions import HTTPException
 from flask_talisman import Talisman
@@ -145,6 +146,13 @@ def _register_routes(app: Flask) -> None:
     def index() -> str:
         """Render the server-running placeholder page."""
         return render_template("base.html")
+
+    if app.config["STEGO_LAB"]:
+        @app.get("/stego-lab")
+        @login_required
+        def stego_lab() -> str:
+            """Serve the opt-in browser-only steganography laboratory."""
+            return render_template("stego_lab.html")
 
 
 def main() -> int:

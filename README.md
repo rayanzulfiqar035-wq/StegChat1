@@ -1,6 +1,6 @@
 # Secure E2EE Messenger
 
-A client-server web messaging app for an information-security course project. Implemented through Step 8: browser identity keys, signed encrypted text over HTTPS/WSS, a temporary delivery queue, and web security hardening.
+A client-server web messaging app for an information-security course project. Implemented through Step 9: browser identity keys, encrypted chat and delivery queue, web security hardening, and an opt-in standalone PNG steganography lab.
 
 ## Run the App
 
@@ -70,13 +70,21 @@ python -m bandit app.py api.py auth.py config.py events.py extensions.py models.
 python -m pip check
 ```
 
-For the Step 6-8 HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
+For the Step 6-9 HTTPS/WSS browser acceptance checks, install Node 22+ and Google Chrome and authorize the local mkcert CA installation above. Run from the project root on Windows:
 
 ```powershell
 node tests/browser_step6.mjs
 ```
 
+Position-stream algorithm and capacity checks:
+
+```powershell
+node --test tests/test_stego.mjs
+```
+
 The browser suite launches an isolated in-memory app on port 5443 and separate temporary Chrome sessions. It uses test accounts, preserves the application's real database, and stops its own process trees afterward. Set `CHROME_BIN` if Chrome is installed elsewhere, `CAROOT` if mkcert uses a custom CA directory, or `STEP6_TEST_PORT` if port 5443 is busy. The regular application still uses port 5000.
+
+The same browser command now covers Step 9 with the lab enabled only in its temporary server, including real PNG download/extraction, eleven self-tests, PNG validation, capacity limits, and checks that lab inputs stay off the network.
 
 Browser console crypto self-test:
 
@@ -100,5 +108,21 @@ HTTP limits are keyed by the connection IP: login submissions 5/minute, registra
 Five wrong passwords for a username within 15 minutes start a full 15-minute lock from the fifth failure. Blocked requests keep the generic login error and do not extend the lock. Login-attempt metadata is stored in SQLite, so the account lock survives server restarts. The in-memory HTTP/socket counters reset on restart, as intended for the single-process development server.
 
 Security events rotate in `logs/audit.log` (1 MiB per file, three backups). Events include account/key activity, lockouts, rate-limit hits, and rejection reasons. Passwords, hashes, key values, ciphertext and message text are excluded. Error pages and socket errors return generic messages.
+
+## Standalone steganography lab (Step 9)
+
+The lab is disabled by default. To enable it locally, set this existing flag in `.env`, restart the app, and sign in:
+
+```dotenv
+STEGO_LAB=1
+```
+
+Open `https://localhost:5000/stego-lab` or use the **Stego lab** navigation link. Without the flag, this URL returns 404; when enabled it still requires login. The implementation does not change your `.env` automatically.
+
+Choose a fully opaque PNG between 256 and 4096 pixels per side, enter text and a 64-character hexadecimal secret key (or generate a random key), and select replacement or matching mode. Embed, download the PNG, then choose that downloaded file under Extract and use the same key. The page shows capacity use and the number of changed RGB channels, with original/stego previews for comparison. Run the self-test button to check the library in your browser.
+
+Only RGB least significant bits carry the frame; alpha is preserved. Usage includes a four-byte length header: above 10% shows a warning, and above 50% is refused. A wrong key can fail or produce garbage because this standalone raw-byte frame is not authenticated. Steganography here hides bytes without encrypting them; PNG conversion to JPEG is unsupported and extraction is rejected. Images, text and keys stay local to the page, with no server upload or chat integration.
+
+See [Step 9 acceptance results](docs/STEP_09_stego_core.checks.md).
 
 Tests for earlier steps explicitly disable rate counters when exercising large queues; `tests/test_step8.py` checks the actual enabled HTTP/socket limits. The browser suite keeps CSP and other headers active and verifies inline-script blocking in a temporary test-only page.

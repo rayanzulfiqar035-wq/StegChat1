@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from cleanup import delete_expired_messages
 class ReviewConfig(Config):
  TESTING=True
+ STEGO_LAB=True
  RATELIMIT_ENABLED=False
  SOCKET_RATE_LIMIT_ENABLED=False
  AUDIT_LOG_PATH=__import__('os').environ['STEP_TEST_AUDIT_PATH']
@@ -124,6 +125,7 @@ try {
       if (!page) return;
       if (message.method === "Network.requestWillBeSent") {
         const request = message.params.request;
+        page.requests.push({ url: request.url, method: request.method, body: request.postData || "" });
         if (request.url.endsWith("/api/keys")) page.uploads.push(request.method);
       }
       if (message.method === "Network.webSocketCreated") page.urls.push(message.params.url);
@@ -153,7 +155,7 @@ try {
     const { browserContextId } = await call("Target.createBrowserContext");
     const { targetId } = await call("Target.createTarget", { url: "about:blank", browserContextId });
     const { sessionId } = await call("Target.attachToTarget", { targetId, flatten: true });
-    const result = { id: sessionId, uploads: [], urls: [], frames: [], errors: [] };
+    const result = { id: sessionId, context: browserContextId, uploads: [], urls: [], frames: [], errors: [], requests: [] };
     sessions.set(sessionId, result);
     await call("Page.enable", {}, sessionId);
     await call("Network.enable", {}, sessionId);
@@ -383,6 +385,73 @@ try {
   await wait(alice, "!e2ee.socket.connected");
   check("HTTP logout disconnects the live browser socket", await evaluate(alice, "fetch('/api/me').then(r=>r.status)") === 401);
   check("no uncaught browser script errors", [...sessions.values()].every((p) => p.errors.length === 0));
+  // Step 9 runs in the local-only lab using actual Canvas PNG encoding/decoding.
+  const lab = keyless;
+  const requestStart = lab.requests.length, socketStart = lab.urls.length;
+  await navigate(lab, '/stego-lab');
+  await wait(lab, "!!document.getElementById('stego-self-test')");
+  await evaluate(lab, `(async()=>{
+    const s=await import('/static/js/stego.js');
+    const canvas=document.createElement('canvas');canvas.width=canvas.height=256;
+    const context=canvas.getContext('2d');context.fillStyle='rgb(80,120,170)';context.fillRect(0,0,256,256);
+    window.__cover=await s.pngBlob(canvas);
+    const dt=new DataTransfer();dt.items.add(new File([window.__cover],'cover.png',{type:'image/png'}));
+    document.getElementById('cover-file').files=dt.files;document.getElementById('cover-file').dispatchEvent(new Event('change'));
+    document.getElementById('generate-key').click();
+    window.__labKey=document.getElementById('stego-key').value;
+    document.getElementById('payload-text').value='<script>alert(1)</script> PNG text ✓';
+  })()`);
+  await wait(lab, "document.getElementById('lab-status').textContent.includes('PNG ready')");
+  await evaluate(lab, "document.getElementById('embed-button').click()");
+  await wait(lab, "document.getElementById('lab-status').textContent.includes('Embedding complete')");
+  check('lab shows used capacity, changed channels and PNG download', await evaluate(lab,
+    "document.getElementById('embed-metrics').textContent.includes('RGB channels changed') && document.getElementById('download-stego').href.startsWith('blob:')"));
+  await call('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: auditDirectory, browserContextId: lab.context });
+  await evaluate(lab, "document.getElementById('download-stego').click()");
+  let downloaded;
+  for (let i=0;i<100;i++) {
+    try { downloaded=await fs.readFile(path.join(auditDirectory,'stego.png'));break; }
+    catch { await sleep(100); }
+  }
+  assert(downloaded, 'PNG download did not complete');
+  await evaluate(lab, `(async()=>{
+    window.__stego=new Blob([Uint8Array.from(atob(${JSON.stringify(downloaded?.toString('base64'))}),c=>c.charCodeAt(0))],{type:'image/png'});
+    const dt=new DataTransfer();dt.items.add(new File([window.__stego],'stego.png',{type:'image/png'}));
+    document.getElementById('extract-file').files=dt.files;document.getElementById('extract-button').click();
+  })()`);
+  await wait(lab, "document.getElementById('lab-status').textContent.startsWith('Extraction complete')");
+  check('lab embed/download/extract returns exact UTF-8 text as harmless DOM text', await evaluate(lab,
+    "document.getElementById('extracted-text').textContent===document.getElementById('payload-text').value && document.getElementById('extracted-text').children.length===0"));
+  check('PNG changes stay within one RGB level and preserve alpha', await evaluate(lab, `(async()=>{
+    const s=await import('/static/js/stego.js'),a=(await s.loadImage(window.__cover)).imageData.data,b=(await s.loadImage(window.__stego)).imageData.data;
+    let changes=0;for(let i=0;i<a.length;i++){if(i%4===3&&a[i]!==b[i])return false;if(Math.abs(a[i]-b[i])>1)return false;if(a[i]!==b[i])changes++;}return changes>0;
+  })()`));
+  const screenshot = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, lab.id);
+  await fs.writeFile(path.join(auditDirectory,'stego-comparison.png'), Buffer.from(screenshot.data,'base64'));
+  console.log('Stego comparison screenshot: '+path.join(auditDirectory,'stego-comparison.png'));
+  await evaluate(lab, "document.getElementById('stego-key').value='00'.repeat(32);document.getElementById('extract-button').click()");
+  await wait(lab, "!document.getElementById('extract-button').disabled");
+  check('wrong key fails cleanly without preserving misleading old output', await evaluate(lab,
+    "document.getElementById('extracted-text').textContent!==document.getElementById('payload-text').value"));
+  await evaluate(lab, "document.getElementById('stego-key').value=window.__labKey;document.getElementById('stego-self-test').click()");
+  await wait(lab, "document.getElementById('lab-status').textContent.includes('self-tests passed')");
+  check('all eleven lab self-tests pass, including 100000 unique positions and JPEG rejection', await evaluate(lab,
+    "document.getElementById('lab-status').textContent==='11/11 self-tests passed.' && document.querySelectorAll('#self-test-results li').length===11"));
+  check('PNG dimension limits reject undersized and oversized images before decode', await evaluate(lab, `(async()=>{
+    const s=await import('/static/js/stego.js');
+    for(const width of [255,4097]){const header=new Uint8Array(await window.__cover.arrayBuffer());new DataView(header.buffer).setUint32(16,width,false);try{await s.loadImage(new Blob([header],{type:'image/png'}));return false;}catch(e){if(!e.message.includes('dimensions'))return false;}}
+    return true;
+  })()`));
+  await evaluate(lab, "document.getElementById('payload-text').value='x'.repeat(3000);document.getElementById('payload-text').dispatchEvent(new Event('input'))");
+  check('usage above ten percent is visibly warned', await evaluate(lab,
+    "document.getElementById('capacity-warning').textContent.includes('Above 10%')"));
+  await evaluate(lab, "document.getElementById('payload-text').value='x'.repeat(12285);document.getElementById('embed-button').click()");
+  await wait(lab, "!document.getElementById('embed-button').disabled");
+  check('lab refuses payload above fifty percent and clears obsolete download', await evaluate(lab,
+    "document.getElementById('lab-status').textContent.includes('50%') && document.getElementById('download-stego').classList.contains('is-hidden')"));
+  check('lab sends no images, payload text or secret keys to the server and opens no sockets',
+    lab.urls.length===socketStart && lab.requests.slice(requestStart).filter(r=>r.url.startsWith(base)).every(r=>r.method==='GET'&&!r.body));
+
   const cspPage = await page(`document.addEventListener('securitypolicyviolation', event => {
     (window.__cspViolations ||= []).push(event.violatedDirective);
   });`);

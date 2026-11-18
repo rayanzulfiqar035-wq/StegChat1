@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Steganography lab — Secure Chat{% endblock %}
+{% block content %}
+<section class="panel stego-lab">
+  <h1>Steganography lab</h1>
+  <p>Hide text in an opaque PNG and recover it locally. Images, text and keys stay in this browser.</p>
+  <p class="muted">Hiding text does not encrypt or authenticate it. Keep the key private. Save the result as PNG; conversion to JPEG destroys the carrier.</p>
+  <div class="field">
+    <label for="stego-key">Secret key (64 hexadecimal characters)</label>
+    <input id="stego-key" type="password" autocomplete="off" spellcheck="false" maxlength="64">
+    <button id="generate-key" class="btn btn--ghost" type="button">Generate random key</button>
+    <span class="field-hint">Keep a copy of the key to extract the result later.</span>
+  </div>
+  <h2>Embed</h2>
+  <div class="field">
+    <label for="cover-file">Opaque PNG, 256–4096 pixels per side</label>
+    <input id="cover-file" type="file" accept="image/png">
+  </div>
+  <div class="field">
+    <label for="payload-text">Text to hide</label>
+    <textarea id="payload-text" rows="5" autocomplete="off" spellcheck="false"></textarea>
+  </div>
+  <div class="field">
+    <label for="embed-mode">Embedding mode</label>
+    <select id="embed-mode"><option value="replace">LSB replacement</option><option value="matching">LSB matching (random ±1)</option></select>
+  </div>
+  <button id="embed-button" class="btn btn--primary" type="button">Embed</button>
+  <p id="capacity-info" class="muted" aria-live="polite">Choose a PNG to see capacity.</p>
+  <p id="embed-metrics" aria-live="polite"></p>
+  <p id="capacity-warning" class="field-error" role="status"></p>
+  <a id="download-stego" class="btn btn--ghost is-hidden" download="stego.png">Download stego PNG</a>
+  <div class="stego-previews">
+    <figure><figcaption>Original</figcaption><img id="cover-preview" class="is-hidden" alt="Original PNG preview"></figure>
+    <figure><figcaption>Stego PNG</figcaption><img id="stego-preview" class="is-hidden" alt="Stego PNG preview"></figure>
+  </div>
+  <h2>Extract</h2>
+  <div class="field">
+    <label for="extract-file">Stego PNG to extract</label>
+    <input id="extract-file" type="file" accept="image/png">
+  </div>
+  <p class="muted">Use the same secret key above. A wrong key may fail or produce meaningless bytes.</p>
+  <button id="extract-button" class="btn btn--primary" type="button">Extract</button>
+  <pre id="extracted-text" class="stego-output" aria-live="polite"></pre>
+  <p id="lab-status" role="status" aria-live="polite"></p>
+  <h2>Self-test</h2>
+  <button id="stego-self-test" class="btn btn--ghost" type="button">Run self-test</button>
+  <ol id="self-test-results" aria-live="polite"></ol>
+</section>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{{ url_for('static', filename='js/stego_lab.js') }}"></script>
+{% endblock %}

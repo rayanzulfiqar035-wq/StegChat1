@@ -488,3 +488,19 @@ a {
   gap: var(--space-1);
   margin-top: 0.25rem;
 }
+
+/* Local steganography lab: existing theme, external stylesheet only. */
+.stego-lab textarea, .stego-lab select {
+  background-color: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.6rem;
+  font: inherit;
+  max-width: 100%;
+}
+.stego-lab textarea { resize: vertical; }
+.stego-previews { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.stego-previews figure { margin: 1rem 0; min-width: 0; }
+.stego-previews img { width: 100%; height: auto; }
+.stego-output { white-space: pre-wrap; overflow-wrap: anywhere; }
