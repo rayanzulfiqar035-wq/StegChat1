@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block body_class %}auth-page{% endblock %}
+{% block main_class %}auth-main{% endblock %}
+{% block site_header %}{% endblock %}
+{% block site_footer %}{% endblock %}
+{% block content %}
+<div class="auth-layout">
+  <section class="auth-story" aria-label="Private messaging">
+    <a class="app-brand" href="{{ url_for('index') }}">{{ icon('brand') }}<span>StegChat<span class="brand-dot">.</span></span></a>
+    <div class="auth-story-content">
+      <span class="eyebrow">A SPACE FOR YOUR WORDS</span>
+      <h1>Closer together.<br><span>Just between us.</span></h1>
+      <img class="auth-illustration" src="{{ url_for('static', filename='images/private-messaging.svg') }}" width="600" height="420" alt="Two message bubbles connected by a lock, illustrated on a dark background">
+      <p>A private place to connect.<br>One conversation at a time.</p>
+    </div>
+    <div class="auth-story-foot">{{ icon('shield') }}<span>End-to-end encrypted. Yours to share.</span></div>
+  </section>
+  <section class="auth-form-side">
+    <div class="auth-form-card">
+      {% block auth_content %}{% endblock %}
+    </div>
+    <p class="auth-footnote">A little more privacy. A little more peace of mind.</p>
+  </section>
+</div>
+{% endblock %}

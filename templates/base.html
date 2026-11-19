@@ -8,11 +8,12 @@
   <title>{% block title %}Secure Chat{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/interface.css') }}">
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <a class="skip-link" href="#main">Skip to content</a>
 
-  <header class="site-header">
+  {% block site_header %}<header class="site-header">
     <a href="{{ url_for('index') }}" class="brand">Secure Chat</a>
     <nav class="site-nav" aria-label="Main">
       {% if current_user.is_authenticated %}
@@ -29,9 +30,9 @@
         <a href="{{ url_for('auth.register') }}">Register</a>
       {% endif %}
     </nav>
-  </header>
+  </header>{% endblock %}
 
-  <main class="site-main" id="main">
+  <main class="{% block main_class %}site-main{% endblock %}" id="main">
     {% block content %}
     <section class="panel">
       <h1>Server running</h1>
@@ -41,9 +42,9 @@
     {% endblock %}
   </main>
 
-  <footer class="site-footer">
+  {% block site_footer %}<footer class="site-footer">
     <p class="muted">Course project &mdash; end-to-end encrypted messaging.</p>
-  </footer>
+  </footer>{% endblock %}
   {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -1,0 +1,27 @@
+{% extends "workspace.html" %}
+{% block title %}Stego — StegChat{% endblock %}
+{% block workspace_content %}
+<header class="workspace-heading">
+  <div><span class="eyebrow">A DIFFERENT WAY TO CONNECT</span><h1>Hidden in plain sight<span class="brand-dot">.</span></h1><p class="muted">Choose how you'd like to carry your message.</p></div>
+  <span class="privacy-pill">{{ icon('shield') }} Encrypted messaging</span>
+</header>
+<section class="transport-section" aria-labelledby="transport-heading">
+  <div class="section-heading"><div><h2 id="transport-heading">Choose your transport</h2><p class="muted">Start with an image. More ways to share are on the way.</p></div><span class="step-label">01 / SELECT</span></div>
+  <div class="transport-grid">
+    <a class="transport-card transport-card--available" href="{{ url_for('stego_image') }}">
+      <div class="transport-card-top"><span class="transport-icon">{{ icon('image') }}</span><span class="availability-badge">Ready to use</span></div>
+      <h3>Image</h3><p>More than meets the eye. Hide your encrypted message inside a PNG.</p><span class="transport-card-action">Send with an image {{ icon('arrow') }}</span>
+    </a>
+    <a class="transport-card" href="{{ url_for('stego_audio') }}">
+      <div class="transport-card-top"><span class="transport-icon">{{ icon('audio') }}</span><span class="availability-badge availability-badge--muted">Coming soon</span></div>
+      <h3>Audio</h3><p>A message between the sounds. An audio carrier for your words.</p><span class="transport-card-action">Explore audio {{ icon('arrow') }}</span>
+    </a>
+    <a class="transport-card" href="{{ url_for('stego_text') }}">
+      <div class="transport-card-top"><span class="transport-icon">{{ icon('text') }}</span><span class="availability-badge availability-badge--muted">Coming soon</span></div>
+      <h3>Text</h3><p>A little meaning between the lines. A text carrier for your words.</p><span class="transport-card-action">Explore text {{ icon('arrow') }}</span>
+    </a>
+  </div>
+  <p class="transport-note">{{ icon('lock') }}<span>Image messages use the same end-to-end encryption as your chat.</span></p>
+</section>
+<a class="back-link" href="{{ url_for('auth.chat_placeholder') }}">{{ icon('back') }} Back to chat</a>
+{% endblock %}

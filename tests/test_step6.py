@@ -3,6 +3,7 @@ import base64
 import json
 import re
 import secrets
+from itertools import combinations
 
 import pytest
 
@@ -10,7 +11,7 @@ from app import create_app
 from auth import _ph
 from config import Config
 from extensions import db, socketio
-from models import User
+from models import PhonebookContact, User
 
 BASE = "https://localhost:5000"
 PASSWORD = "test-only-account-password"
@@ -20,6 +21,15 @@ B64 = lambda value: base64.b64encode(value).decode("ascii")
 @pytest.fixture(scope="module")
 def account_hash():
     return _ph.hash(PASSWORD)
+
+
+def approve_fixture_contacts():
+    """Existing relay/security regressions run between approved test contacts."""
+    users = User.query.order_by(User.id).all()
+    for first, second in combinations(users, 2):
+        db.session.add(PhonebookContact(user_a_id=first.id, user_b_id=second.id,
+                                       requested_by_id=first.id, accepted=True))
+    db.session.commit()
 
 
 @pytest.fixture
@@ -39,6 +49,7 @@ def app(account_hash, monkeypatch, tmp_path):
         db.session.add_all(User(username=name, password_hash=account_hash)
                            for name in ("alice", "bob", "offline"))
         db.session.commit()
+        approve_fixture_contacts()
     yield application
     with application.app_context():
         db.session.remove()
@@ -46,7 +57,7 @@ def app(account_hash, monkeypatch, tmp_path):
 
 
 def csrf(client):
-    response = client.get("/", base_url=BASE)
+    response = client.get("/", base_url=BASE, follow_redirects=True)
     return re.search(r'<meta name="csrf-token" content="([^"]+)"', response.text)[1]
 
 

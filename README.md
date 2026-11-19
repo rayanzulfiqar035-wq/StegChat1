@@ -49,16 +49,76 @@ https://localhost:5000
 
 If the browser reports `ERR_CERT_AUTHORITY_INVALID`, install the existing local mkcert CA with `mkcert -install`, then restart the browser. This changes the computer's certificate trust store; do it only on your development computer with authorization. Certificate verification must stay enabled.
 
+## Vercel deployment
+
+Set the Vercel project root to this `sourceCode` directory. The `pyproject.toml`
+entrypoint exports `wsgi:app`, and its build script copies `static/` into
+Vercel's `public/static/` directory. Set these environment variables in Vercel:
+
+- `SECRET_KEY`: a random value of at least 32 characters, shared by all instances.
+- `DATABASE_URL`: a persistent PostgreSQL URL beginning with
+  `postgresql+psycopg://`. The local SQLite default is unsuitable for a
+  Vercel Function.
+- `APP_ORIGIN`: the exact public HTTPS origin, such as
+  `https://chat.example.com`. If omitted, `https://$VERCEL_URL` is used.
+
+The local mkcert files are not needed on Vercel because HTTPS terminates before
+the Python function. The Vercel entrypoint disables the hourly in-process
+cleanup task; expired queued messages are still removed when an instance starts.
+This entrypoint resolves Flask app detection. Live Socket.IO delivery across
+multiple function instances still needs a shared message broker and deployment
+testing; do not rely on this configuration for production chat until that work
+is complete.
+
 ## Chat and delivery behavior
 
-- Open a normal and a private browser session, register different usernames, and enter each other's exact usernames to chat. Once a recipient has published keys, messages can be sent while they are offline; ciphertext waits until their browser reconnects.
+- The website opens the login page directly, with a **Create an account** link.
+  Once signed in, use the collapsible sidebar to switch between **Chat** and
+  **Stego**. The sidebar remembers only its layout preference. On small screens
+  it starts collapsed; Escape closes the expanded drawer.
+- **Send with stego** opens the transport selector. **Image** opens the darker
+  PNG composer; **Audio** and **Text** open clearly marked, disabled previews.
+  A valid PNG is required to send from the image composer. Normal Chat continues
+  to send encrypted text. The image composer also displays incoming messages
+  using the existing verification, decryption and acknowledgment behavior.
+- Use **Phonebook** in Chat or the image composer to send a request by exact
+  username. The recipient must choose **Accept**; then both users become
+  approved contacts. Pending requests do not permit messaging. You can decline
+  incoming requests, cancel outgoing requests, or remove approved contacts.
+  Removal blocks further sends and queued delivery in both directions, including
+  attempts that bypass the browser UI. Fingerprint verification still applies.
+- Open a normal and a private browser session, register different usernames,
+  send and accept a contact request, then choose the approved contact to chat.
+  Once a recipient has published keys, messages can be sent while they are
+  offline; ciphertext waits until their browser reconnects.
 - Compare the displayed fingerprints through a separate trusted channel. A changed contact key blocks messages until **Trust new key** is clicked. Ask the sender to resend a message rejected while a replacement key was untrusted.
 - Private keys remain nonextractable in this browser's IndexedDB. If browser data is lost, resetting keys allows new messages; it cannot recover messages encrypted to lost keys.
+- Offline deliveries encrypted before a recipient key reset still need the old
+  private key. Ask the sender to send the message again using the current
+  verified fingerprint; image messages need a fresh cover PNG. Each rejected
+  delivery now shows its cause and recovery advice beside the dismiss button.
+  Temporary lookup failures can be retried by refreshing after the limit or
+  connection problem clears. Rejected deliveries are retained until explicitly
+  dismissed or expired.
 - Existing IndexedDB data upgrades automatically. Close other chat tabs if an upgrade is blocked. Older contacts without an account owner require an explicit trust review.
 - Logging out closes all current chat sockets for that account, including other tabs and devices. They must reconnect after signing in.
 - The sender sees **Message sent** after the server stores the envelope. The recipient acknowledges it after verification, decryption and rendering; only then is the queued row deleted. Reconnection delivers the oldest pending messages first, up to 200 per connection, without rendering accepted duplicates twice.
 - Rejected messages remain pending. **Dismiss rejected message** explicitly deletes a rejected delivery; no rejected content is displayed. Reconnect to retry after resolving a key-trust issue.
 - The queue allows 100 pending messages per sender/recipient pair by default; further sends return `queue_full`. Undelivered messages expire after `MESSAGE_TTL_DAYS` (default 7 days). Cleanup runs at startup and hourly. Fractional days such as `0.0007` can be used for expiry testing.
+
+The phonebook adds only request/approval metadata in `phonebook_contacts`.
+Starting the app adds this table without recreating the existing database.
+Existing accounts are not automatically approved. Previously queued ciphertext
+is withheld until the users approve a contact request and reconnect; removed
+contacts' queued rows remain encrypted until expiry or explicit recipient
+dismissal, and become eligible again if a new request is accepted.
+
+The authenticated API is `GET/POST /api/contacts`,
+`POST /api/contacts/<username>/accept`, and `DELETE /api/contacts/<username>`.
+Changes require CSRF protection and share a 30/hour limit. The phonebook list
+is private to the signed-in account. Contact changes notify only the affected
+accounts to refresh their lists. Encryption parameters and envelope fields are
+unchanged.
 
 ## Run the checks
 
@@ -137,7 +197,7 @@ The lab is disabled by default. To enable it locally, set this existing flag in 
 STEGO_LAB=1
 ```
 
-Open `https://localhost:5000/stego-lab` or use the **Stego lab** navigation link. Without the flag, this URL returns 404; when enabled it still requires login. The implementation does not change your `.env` automatically.
+Open `https://localhost:5000/stego-lab` or use the **Local lab** sidebar link. Without the flag, this URL returns 404; when enabled it still requires login. The implementation does not change your `.env` automatically.
 
 Choose a fully opaque PNG between 256 and 4096 pixels per side, enter text and a 64-character hexadecimal secret key (or generate a random key), and select replacement or matching mode. Embed, download the PNG, then choose that downloaded file under Extract and use the same key. The page shows capacity use and the number of changed RGB channels, with original/stego previews for comparison. Run the self-test button to check the library in your browser.
 
@@ -147,7 +207,7 @@ See [Step 9 acceptance results](docs/STEP_09_stego_core.checks.md).
 
 ## Encrypted PNG messages in chat (Step 10)
 
-In Chat, choose **Attach cover image**, enter the recipient and message, then Send. The PNG must be fully opaque and 256–4096 pixels per side. **Remove image** switches back to normal encrypted text. This chat feature works independently of the opt-in lab flag.
+In Chat, choose **Send with stego**, then **Image**. On the image page, enter the recipient, choose a cover PNG, write your message, and choose **Encrypt & send image**. The PNG must be fully opaque and 256–4096 pixels per side. The preview and capacity information stay local to the browser. **Remove image** clears the attachment; the image page requires a valid cover before sending again. Use **Chat** in the sidebar to send normal encrypted text. This feature works independently of the opt-in lab flag.
 
 Use each cover image once. The page blocks an identical file already transmitted during the current page session, including unsuccessful/uncertain delivery attempts, and clears attachments after successful sends. Across reloads or devices, choose a genuinely fresh cover yourself. Usage above 10% shows a warning; above 50% is refused, counting the length header, IV and authentication tag. The final exported PNG is limited to `MAX_STEGO_BYTES` (default 3 MiB). Stego sends are limited to 5/minute per account within the existing 30/minute overall send limit.
 

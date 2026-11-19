@@ -1,6 +1,6 @@
-{% extends "base.html" %}
+{% extends "workspace.html" %}
 {% block title %}Steganography lab — Secure Chat{% endblock %}
-{% block content %}
+{% block workspace_content %}
 <section class="panel stego-lab">
   <h1>Steganography lab</h1>
   <p>Hide text in an opaque PNG and recover it locally. Images, text and keys stay in this browser.</p>
@@ -47,6 +47,6 @@
   <ol id="self-test-results" aria-live="polite"></ol>
 </section>
 {% endblock %}
-{% block scripts %}
+{% block workspace_scripts %}
 <script type="module" src="{{ url_for('static', filename='js/stego_lab.js') }}"></script>
 {% endblock %}

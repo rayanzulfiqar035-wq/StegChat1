@@ -46,7 +46,7 @@ def create_app(config_class: type[Config] = Config) -> Flask:
              content_security_policy={
                  "default-src": "'self'", "script-src": "'self'", "style-src": "'self'",
                  "img-src": "'self' blob: data:",
-                 "connect-src": "'self' wss://localhost:5000 wss://127.0.0.1:5000",
+                 "connect-src": app.config["CSP_CONNECT_SRC"],
                  "frame-ancestors": "'none'", "base-uri": "'self'", "form-action": "'self'"})
 
     db.init_app(app)
@@ -80,7 +80,7 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     # Cross-origin WebSocket requests are rejected automatically.
     socketio.init_app(
         app,
-        cors_allowed_origins=["https://localhost:5000", "https://127.0.0.1:5000"],
+        cors_allowed_origins=app.config["SOCKET_ALLOWED_ORIGINS"],
         max_http_buffer_size=max(5_000_000, 4 * ((app.config["MAX_STEGO_BYTES"] + 2) // 3) + 65536),
     )
 
@@ -103,7 +103,7 @@ def create_app(config_class: type[Config] = Config) -> Flask:
     _register_user_loader()
     _register_login_manager(app)
     _register_routes(app)
-    if not app.testing:
+    if not app.testing and app.config["ENABLE_BACKGROUND_CLEANUP"]:
         from cleanup import start_cleanup_task
         app.extensions["message_cleanup_task"] = start_cleanup_task(app)
     return app
@@ -141,12 +141,38 @@ def _register_login_manager(app: Flask) -> None:
 
 
 def _register_routes(app: Flask) -> None:
-    """Register top-level routes (placeholder index from Step 1)."""
+    """Register entry and authenticated steganography presentation pages."""
 
     @app.get("/")
-    def index() -> str:
-        """Render the server-running placeholder page."""
-        return render_template("base.html")
+    def index():
+        """Open sign-in directly; the existing login view handles signed-in users."""
+        return redirect(url_for("auth.login"))
+
+    @app.get("/stego")
+    @login_required
+    def stego():
+        """Choose the carrier for a steganographic message."""
+        return render_template("stego.html")
+
+    @app.get("/stego/image")
+    @login_required
+    def stego_image():
+        """Use the existing encrypted chat client with a required PNG cover."""
+        return render_template("chat.html", stego_mode=True)
+
+    @app.get("/stego/audio")
+    @login_required
+    def stego_audio():
+        """Show the audio placeholder without enabling uploads or sending."""
+        return render_template("stego_placeholder.html", transport="Audio",
+                               transport_icon="audio", file_accept="audio/*")
+
+    @app.get("/stego/text")
+    @login_required
+    def stego_text():
+        """Show the text placeholder without enabling uploads or sending."""
+        return render_template("stego_placeholder.html", transport="Text",
+                               transport_icon="text", file_accept="text/plain")
 
     if app.config["STEGO_LAB"]:
         @app.get("/stego-lab")

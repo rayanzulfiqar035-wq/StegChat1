@@ -7,6 +7,9 @@ Routes:
 - POST /api/keys                — upload first public keys (409 if already set)
 - PUT  /api/keys                — replace public keys (explicit key reset)
 - GET  /api/users/<username>/keys — {username, ecdh_jwk, ecdsa_jwk} (404 if missing)
+- GET/POST /api/contacts         — own phonebook / request a contact
+- POST /api/contacts/<username>/accept — recipient approval
+- DELETE /api/contacts/<username> — cancel, decline or remove
 
 Security:
 - All routes require authentication (@login_required).
@@ -27,10 +30,115 @@ from flask import Blueprint, jsonify, request
 from flask_login import current_user, login_required
 
 from audit import audit_event
-from extensions import db, limiter
-from models import User
+from extensions import db, limiter, socketio
+from models import PhonebookContact, User
+from contacts import contact_between, contact_lock
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+
+def _contact_user(username):
+    """Look up one exact, normalized username without listing other users."""
+    if not isinstance(username, str):
+        return None
+    username = username.strip().lower()
+    if not re.fullmatch(r"[a-z0-9_]{3,32}", username):
+        return None
+    return User.query.filter_by(username=username).first()
+
+
+def _notify_contacts(peer_id):
+    """Tell only the affected accounts to refresh their own phonebooks."""
+    for user_id in (current_user.id, peer_id):
+        socketio.emit("contacts_changed", {}, to=f"user:{user_id}")
+
+
+@api_bp.get("/contacts")
+@limiter.limit("60 per minute")
+@login_required
+def get_contacts():
+    """Return this account's accepted, incoming and outgoing contacts only."""
+    user_id = current_user.id
+    rows = PhonebookContact.query.filter(db.or_(
+        PhonebookContact.user_a_id == user_id,
+        PhonebookContact.user_b_id == user_id)).all()
+    contacts = []
+    for row in rows:
+        peer = row.user_b if row.user_a_id == user_id else row.user_a
+        status = "accepted" if row.accepted else (
+            "outgoing" if row.requested_by_id == user_id else "incoming")
+        contacts.append({"username": peer.username, "status": status})
+    response = jsonify({"contacts": sorted(contacts, key=lambda item: item["username"])})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@api_bp.post("/contacts")
+@limiter.shared_limit("30 per hour", scope="phonebook_write", methods=["POST", "DELETE"])
+@login_required
+def request_contact():
+    """Send a request; even a crossed request never implicitly accepts it."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) != {"username"}:
+        return jsonify({"error": "provide one username"}), 400
+    peer = _contact_user(data["username"])
+    if peer is None:
+        return jsonify({"error": "user not found"}), 404
+    if peer.id == current_user.id:
+        return jsonify({"error": "cannot add yourself"}), 400
+    with contact_lock:
+        if contact_between(current_user.id, peer.id) is not None:
+            return jsonify({"error": "contact or request already exists"}), 409
+        low, high = sorted((current_user.id, peer.id))
+        db.session.add(PhonebookContact(user_a_id=low, user_b_id=high,
+                                       requested_by_id=current_user.id))
+        db.session.commit()
+        audit_event("contact_requested", current_user.username)
+        _notify_contacts(peer.id)
+    return jsonify({"ok": True}), 201
+
+
+@api_bp.post("/contacts/<username>/accept")
+@limiter.shared_limit("30 per hour", scope="phonebook_write", methods=["POST", "DELETE"])
+@login_required
+def accept_contact(username):
+    """Only the recipient of an existing pending request may accept it."""
+    peer = _contact_user(username)
+    if peer is None:
+        return jsonify({"error": "request not found"}), 404
+    with contact_lock:
+        contact = contact_between(current_user.id, peer.id)
+        if contact is None:
+            return jsonify({"error": "request not found"}), 404
+        if contact.accepted:
+            return jsonify({"error": "already contacts"}), 409
+        # SECURITY: a sender cannot accept their own request or act for a peer.
+        if contact.requested_by_id == current_user.id:
+            return jsonify({"error": "only the recipient can accept"}), 403
+        contact.accepted = True
+        db.session.commit()
+        audit_event("contact_accepted", current_user.username)
+        _notify_contacts(peer.id)
+    return jsonify({"ok": True})
+
+
+@api_bp.delete("/contacts/<username>")
+@limiter.shared_limit("30 per hour", scope="phonebook_write", methods=["POST", "DELETE"])
+@login_required
+def remove_contact(username):
+    """Cancel/decline a request or revoke an accepted connection for both users."""
+    peer = _contact_user(username)
+    if peer is None:
+        return jsonify({"error": "contact not found"}), 404
+    with contact_lock:
+        contact = contact_between(current_user.id, peer.id)
+        if contact is None:
+            return jsonify({"error": "contact not found"}), 404
+        db.session.delete(contact)
+        db.session.commit()
+        audit_event("contact_removed", current_user.username)
+        _notify_contacts(peer.id)
+    return jsonify({"ok": True})
 
 _ALLOWED_JWK_KEYS = frozenset({"kty", "crv", "x", "y"})
 

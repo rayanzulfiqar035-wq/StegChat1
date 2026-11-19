@@ -1,7 +1,7 @@
 """ORM models for the secure chat application.
 
-Users and temporary encrypted deliveries. All columns are defined as in
-docs/PROJECT_MAIN.md section 9.
+Users, temporary encrypted deliveries, login attempts and explicit phonebook
+consent. The phonebook is the user-requested extension to the main data model.
 """
 
 from __future__ import annotations
@@ -82,6 +82,25 @@ class PendingMessage(db.Model):
         else:
             envelope["img"] = self.ciphertext
         return envelope
+
+
+class PhonebookContact(db.Model):
+    """One request/approval per unordered pair; no message or key material."""
+
+    __tablename__ = "phonebook_contacts"
+    __table_args__ = (
+        db.CheckConstraint("user_a_id < user_b_id", name="phonebook_ordered_pair"),
+        db.CheckConstraint("requested_by_id = user_a_id OR requested_by_id = user_b_id",
+                           name="phonebook_requester_is_member"),
+    )
+    user_a_id: db.Mapped[int] = db.mapped_column(db.ForeignKey("users.id"), primary_key=True)
+    user_b_id: db.Mapped[int] = db.mapped_column(db.ForeignKey("users.id"), primary_key=True)
+    requested_by_id: db.Mapped[int] = db.mapped_column(db.ForeignKey("users.id"), nullable=False)
+    accepted: db.Mapped[bool] = db.mapped_column(nullable=False, default=False)
+    created_at: db.Mapped[datetime] = db.mapped_column(
+        db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    user_a = db.relationship(User, foreign_keys=[user_a_id], lazy="joined")
+    user_b = db.relationship(User, foreign_keys=[user_b_id], lazy="joined")
 
 
 class LoginAttempt(db.Model):

@@ -20,7 +20,6 @@ import base64
 import binascii
 import json
 import re
-from threading import RLock
 from collections import deque
 from time import monotonic
 from typing import Any
@@ -33,11 +32,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from extensions import db, socketio
 from models import PendingMessage, User
 from audit import audit_event
+from contacts import approved_peer_ids, contact_lock, is_approved
 
 # In-memory tracking of active connections per user ID.
 # Maps user_id -> set of active Socket.IO session IDs (sids).
 _connected_users: dict[int, set[str]] = {}
-_connections_lock = RLock()
+_connections_lock = contact_lock
 
 
 def _send_rate_allowed(user_id, bucket="socket_send_rates", limit=30):
@@ -160,7 +160,10 @@ def handle_connect() -> bool | None:
         user_id = current_user.id
         join_room(f"user:{user_id}")
         _connected_users.setdefault(user_id, set()).add(request.sid)
-        queued = PendingMessage.query.filter_by(recipient_id=user_id).order_by(
+        # SECURITY: recheck current approval even for messages queued earlier.
+        queued = PendingMessage.query.filter(
+            PendingMessage.recipient_id == user_id,
+            PendingMessage.sender_id.in_(approved_peer_ids(user_id))).order_by(
             PendingMessage.created_at, PendingMessage.id).limit(200).all()
         for message in queued:
             emit("message", message.envelope(), to=request.sid)
@@ -230,6 +233,8 @@ def handle_send_message(data: Any) -> dict[str, Any]:
         # SECURITY: count and insert under the same lock in this single-process
         # threading server, so simultaneous sends cannot bypass the pair cap.
         try:
+            if not is_approved(current_user.id, recipient.id):
+                return reject_message("contact not approved")
             count = PendingMessage.query.filter_by(sender_id=current_user.id,
                                                   recipient_id=recipient.id).count()
             if count >= current_app.config["MAX_PENDING_PER_PAIR"]:

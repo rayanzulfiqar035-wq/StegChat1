@@ -1,9 +1,10 @@
-{% extends "base.html" %}
+{% extends "auth_layout.html" %}
 {% block title %}Log in — Secure Chat{% endblock %}
 
-{% block content %}
-<section class="panel auth-panel">
-  <h1>Log in</h1>
+{% block auth_content %}
+  <span class="eyebrow">WELCOME TO STEGCHAT</span>
+  <h2 class="auth-heading">Welcome back<span class="brand-dot">.</span></h2>
+  <p class="auth-intro">Log in and pick up the conversation.</p>
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
@@ -17,7 +18,7 @@
 
     <div class="field">
       {{ form.username.label }}
-      {{ form.username(autocomplete="username", spellcheck="false") }}
+      {{ form.username(autocomplete="username", spellcheck="false", placeholder="Your username", autofocus=true) }}
       {% for error in form.username.errors %}
         <span class="field-error">{{ error }}</span>
       {% endfor %}
@@ -25,17 +26,17 @@
 
     <div class="field">
       {{ form.password.label }}
-      {{ form.password(autocomplete="current-password") }}
+      {{ form.password(autocomplete="current-password", placeholder="Your password") }}
       {% for error in form.password.errors %}
         <span class="field-error">{{ error }}</span>
       {% endfor %}
     </div>
 
     <div class="form-actions">
-      {{ form.submit(class="btn btn--primary") }}
+      {{ form.submit(class="btn btn--primary auth-submit", value="Log in") }}
     </div>
   </form>
 
-  <p class="auth-alt">No account yet? <a href="{{ url_for('auth.register') }}">Register</a></p>
-</section>
+  <p class="auth-alt">New here? <a href="{{ url_for('auth.register') }}">Create an account</a></p>
+  <div class="auth-privacy">{{ icon('lock') }}<span>Your private keys stay in your browser.</span></div>
 {% endblock %}

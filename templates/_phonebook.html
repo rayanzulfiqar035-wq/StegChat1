@@ -1,0 +1,13 @@
+<details class="phonebook" id="phonebook" open>
+  <summary>Phonebook <span>Connect with people you know</span></summary>
+  <p class="field-hint">Send a request by username. You can send and receive messages only after they accept.</p>
+  <form id="phonebook-form" method="post" class="phonebook-form">
+    <label class="visually-hidden" for="phonebook-username">Username to add</label>
+    <input id="phonebook-username" type="text" placeholder="Their exact username" autocomplete="off" spellcheck="false" maxlength="32" required>
+    <button id="phonebook-request-button" class="btn btn--ghost btn--small" type="submit">Send request</button>
+    <button id="phonebook-refresh" class="btn btn--ghost btn--small" type="button">Refresh</button>
+  </form>
+  <p id="phonebook-status" class="field-hint" role="status" aria-live="polite"></p>
+  <ul id="phonebook-list" class="phonebook-list" aria-label="Contacts and requests"><li class="phonebook-empty">Loading your phonebook…</li></ul>
+  <datalist id="phonebook-options"></datalist>
+</details>

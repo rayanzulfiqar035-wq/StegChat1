@@ -1,88 +1,52 @@
-{% extends "base.html" %}
-{% block title %}Chat — Secure Chat{% endblock %}
-
-{% block content %}
-<section class="panel chat-panel" data-max-stego-bytes="{{ config.MAX_STEGO_BYTES }}">
+{% extends "workspace.html" %}
+{% block title %}{{ 'Image stego' if stego_mode else 'Chat' }} &mdash; StegChat{% endblock %}
+{% block workspace_body_class %}{% if stego_mode %} stego-image-page{% endif %}{% endblock %}
+{% block workspace_content %}
+{% if stego_mode %}<a class="back-link" href="{{ url_for('stego') }}">{{ icon('back') }} Choose another transport</a>{% endif %}
+<header class="workspace-heading">
+  <div><span class="eyebrow">{{ 'IMAGE STEGANOGRAPHY' if stego_mode else 'YOUR PRIVATE SPACE' }}</span><h1>{{ 'A message beneath the pixels' if stego_mode else 'Your conversations' }}<span class="brand-dot">.</span></h1><p class="muted">{{ 'Choose a PNG, write your message, and send it securely.' if stego_mode else 'Good conversations deserve a little privacy.' }}</p></div>
+  <span class="privacy-pill">{{ icon('shield') }} End-to-end encrypted</span>
+</header>
+<section class="panel chat-panel{% if stego_mode %} image-composer{% endif %}" data-max-stego-bytes="{{ config.MAX_STEGO_BYTES }}" data-require-cover="{{ 'true' if stego_mode else 'false' }}">
   <div class="chat-header">
     <div class="user-meta">
-      <div>
-        <span class="muted">Logged in as:</span>
-        <strong id="current-username" class="username-label">{{ current_user.username }}</strong>
-      </div>
-      <div class="fingerprint-badge" id="my-fingerprint-box" title="Your public key fingerprint">
-        <span class="muted">Your Key:</span>
-        <span id="my-fingerprint" class="mono">Loading...</span>
-      </div>
+      <div><span class="muted">Logged in as </span><strong id="current-username" class="username-label">{{ current_user.username }}</strong></div>
+      <div class="fingerprint-badge" id="my-fingerprint-box" title="Your public key fingerprint"><span class="muted">Your key</span><span id="my-fingerprint" class="mono">Loading...</span></div>
     </div>
-
-    {# SECURITY: logout is a POST with a CSRF token; a plain link would allow
-       a third-party page to log the user out with a GET request. #}
-    <form method="post" action="{{ url_for('auth.logout') }}" class="logout-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <button type="submit" class="btn btn--ghost btn--small">Log out</button>
-    </form>
+    {% if not stego_mode %}<a class="btn btn--ghost stego-send-link" href="{{ url_for('stego') }}">{{ icon('layers') }} Send with stego {{ icon('arrow') }}</a>{% else %}<span class="availability-badge">{{ icon('image') }} PNG transport</span>{% endif %}
   </div>
-
-  {# Prominent security banner for key loss warnings or contact key changes #}
+  {% include "_phonebook.html" %}
   <div id="security-alert" class="security-alert is-hidden" role="alert">
-    <div class="alert-content">
-      <strong id="alert-title">Security Alert</strong>
-      <p id="alert-message"></p>
-      <div id="alert-actions" class="alert-actions"></div>
-    </div>
+    <div class="alert-content"><strong id="alert-title">Security Alert</strong><p id="alert-message"></p><div id="alert-actions" class="alert-actions"></div></div>
   </div>
-
-  <div class="recipient-bar">
-    <label for="recipient-input">To:</label>
-    <input
-      type="text"
-      id="recipient-input"
-      class="recipient-input"
-      placeholder="Recipient username"
-      autocomplete="off"
-      spellcheck="false"
-      required
-    >
-  </div>
-
-  <div id="contact-security-bar" class="contact-security-bar is-hidden">
-    <span class="muted">Contact Key:</span>
-    <span id="contact-fingerprint" class="mono"></span>
-  </div>
-
+  <div class="recipient-bar"><label for="recipient-input">To</label><input type="text" id="recipient-input" class="recipient-input" list="phonebook-options" placeholder="Choose an approved phonebook contact" autocomplete="off" spellcheck="false" required></div>
+  <div id="contact-security-bar" class="contact-security-bar is-hidden"><span class="muted">Contact key</span><span id="contact-fingerprint" class="mono"></span></div>
+  {% if stego_mode %}<div class="image-composer-grid"><div class="image-composer-fields">{% else %}
   <div id="messages-list" class="messages-list" aria-live="polite" aria-label="Messages">
-    <!-- Messages are appended dynamically via textContent in chat.js -->
+    <div class="messages-empty">{{ icon('chat') }}<h2>A conversation starts with hello.</h2><p>Choose an approved contact above and send your first message.</p></div>
   </div>
-
-  <div id="chat-status" class="chat-status" role="status" aria-live="polite"></div>
-
-  <div class="field">
-    <label for="cover-image">Attach cover image (optional, opaque PNG)</label>
-    <input id="cover-image" type="file" accept="image/png">
-    <button id="remove-cover" class="btn btn--ghost btn--small" type="button">Remove image</button>
-    <span class="field-hint">Use each cover image only once. PNGs must be opaque and 256–4096 pixels per side.</span>
-    <span id="cover-usage" class="field-hint" aria-live="polite"></span>
-    <span id="cover-warning" class="field-error" role="status"></span>
+  {% endif %}
+  {# Keep the same client controls and encrypted send pipeline. #}
+  <div class="field cover-field{% if not stego_mode %} is-hidden{% endif %}">
+    <label for="cover-image">Cover image <span class="field-optional">OPAQUE PNG</span></label>
+    <div class="cover-upload">{{ icon('upload') }}<span>Choose a cover for your message</span><input id="cover-image" type="file" accept="image/png"{% if stego_mode %} required{% endif %}></div>
+    <div class="cover-file-row"><span id="cover-filename" class="field-hint">No image selected</span><button id="remove-cover" class="btn btn--ghost btn--small" type="button">Remove image</button></div>
+    <span class="field-hint">Use each cover image only once. PNGs must be opaque and 256&ndash;4096 pixels per side.</span>
+    <span id="cover-usage" class="field-hint" aria-live="polite"></span><span id="cover-warning" class="field-error" role="status"></span>
   </div>
-
-  <form id="chat-form" class="chat-form" novalidate>
+  <form id="chat-form" class="chat-form{% if stego_mode %} image-message-form{% endif %}" novalidate>
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input
-      type="text"
-      id="message-input"
-      class="message-input"
-      placeholder="Type a message (max 2000 characters)..."
-      maxlength="2000"
-      autocomplete="off"
-      required
-    >
-    <button type="submit" id="send-btn" class="btn btn--primary">Send</button>
+    {% if stego_mode %}<label for="message-input">Your message</label><textarea id="message-input" class="message-input" rows="5" placeholder="What would you like to keep between you?" maxlength="2000" autocomplete="off" required></textarea><span class="field-hint">Up to 2,000 characters. Encrypted before being hidden in the image.</span>{% else %}<label class="visually-hidden" for="message-input">Your message</label><input type="text" id="message-input" class="message-input" placeholder="Write a message…" maxlength="2000" autocomplete="off" required>{% endif %}
+    <button type="submit" id="send-btn" class="btn btn--primary" disabled>{{ icon('lock' if stego_mode else 'arrow') }} {{ 'Encrypt & send image' if stego_mode else 'Send' }}</button>
   </form>
+  <div id="chat-status" class="chat-status" role="status" aria-live="polite"></div>
+  {% if stego_mode %}</div><aside class="cover-preview-panel" aria-label="Cover image preview"><div class="section-heading"><span class="eyebrow">YOUR COVER</span>{{ icon('image') }}</div><div class="cover-preview-stage"><div id="cover-preview-empty">{{ icon('image') }}<p>Your image, a little more to it.</p><span class="muted">A preview will appear here.</span></div><img id="selected-cover-preview" class="is-hidden" alt="Selected PNG cover preview"></div><p class="field-hint">Your image and message are processed in your browser. Only the encrypted carrier is sent.</p></aside></div>
+  <div class="delivery-heading"><h2>Conversation</h2><span class="muted">Messages received here are verified before display.</span></div>
+  <div id="messages-list" class="messages-list image-messages-list" aria-live="polite" aria-label="Messages"><div class="messages-empty">{{ icon('chat') }}<p>Your sent and received messages appear here.</p></div></div>
+  {% endif %}
 </section>
 {% endblock %}
-
-{% block scripts %}
-{# Vendor script loaded from local static files; no CDN links per Rule 8. #}
+{% block workspace_scripts %}
 <script src="{{ url_for('static', filename='js/vendor/socket.io.min.js') }}"></script>
 <script type="module" src="{{ url_for('static', filename='js/chat.js') }}"></script>
 {% endblock %}

@@ -10,7 +10,7 @@ from auth import _ph
 from config import Config
 from extensions import db, socketio
 from models import LoginAttempt, PendingMessage, User
-from test_step6 import BASE, PASSWORD, csrf, envelope, public_keys
+from test_step6 import BASE, PASSWORD, approve_fixture_contacts, csrf, envelope, public_keys
 
 
 @pytest.fixture
@@ -25,6 +25,7 @@ def hardened(tmp_path):
         hashed = _ph.hash(PASSWORD)
         db.session.add_all(User(username=n, password_hash=hashed) for n in ("alice", "bob"))
         db.session.commit()
+        approve_fixture_contacts()
     @app.get("/forced-error")
     @app.get("/api/forced-error")
     def fail():

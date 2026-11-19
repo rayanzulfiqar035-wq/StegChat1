@@ -81,6 +81,10 @@ class Config:
 
     SSL_CERT = _env_str("SSL_CERT", "certs/localhost.pem")
     SSL_KEY = _env_str("SSL_KEY", "certs/localhost-key.pem")
+    REQUIRE_LOCAL_TLS = True
+    ENABLE_BACKGROUND_CLEANUP = True
+    SOCKET_ALLOWED_ORIGINS = ["https://localhost:5000", "https://127.0.0.1:5000"]
+    CSP_CONNECT_SRC = "'self' wss://localhost:5000 wss://127.0.0.1:5000"
 
     MESSAGE_TTL_DAYS = _env_days("MESSAGE_TTL_DAYS", 7)
     MAX_TEXT_BYTES = _env_int("MAX_TEXT_BYTES", 16384)
@@ -92,6 +96,7 @@ class Config:
 
     STEGO_LAB = bool(_env_flag("STEGO_LAB", 0))
     AUDIT_LOG_PATH = str(BASE_DIR / "logs" / "audit.log")
+    AUDIT_LOG_TO_STDOUT = False
     RATELIMIT_STORAGE_URI = "memory://"
     RATELIMIT_ENABLED = True
     SOCKET_RATE_LIMIT_ENABLED = True
@@ -119,6 +124,9 @@ class Config:
                 "SECRET_KEY is too short (minimum 32 characters). Generate a strong one with:\n"
                 '  python -c "import secrets; print(secrets.token_hex(32))"'
             )
+
+        if not cls.REQUIRE_LOCAL_TLS:
+            return
 
         cert_path = Path(cls.SSL_CERT)
         if not cert_path.is_absolute():

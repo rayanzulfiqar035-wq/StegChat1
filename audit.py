@@ -2,25 +2,30 @@
 import ipaddress
 import logging
 import re
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from flask import current_app, has_request_context, request
 
 EVENTS = {"registration", "login_success", "login_failure", "logout", "keys_uploaded",
-          "keys_reset", "rate_limit", "lockout", "message_rejected", "server_error", "request_rejected"}
+          "keys_reset", "rate_limit", "lockout", "message_rejected", "server_error", "request_rejected",
+          "contact_requested", "contact_accepted", "contact_removed"}
 REASONS = {"http", "socket", "csrf", "invalid payload", "unsupported version", "unsupported kind",
            "sender mismatch", "invalid recipient", "invalid timestamp", "invalid base64",
            "message too large", "invalid ephemeral key", "invalid iv", "invalid signature",
-           "invalid ciphertext", "invalid PNG", "image too large", "recipient not found", "unauthorized", "queue_full", "storage unavailable"}
+           "invalid ciphertext", "invalid PNG", "image too large", "recipient not found", "unauthorized", "queue_full", "storage unavailable", "contact not approved"}
 
 
 def init_audit(app):
-    """Bind one rotating UTF-8 log to this application instance."""
-    path = Path(app.config["AUDIT_LOG_PATH"])
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Bind a rotating local log or deployment stdout to this app instance."""
     logger = logging.Logger("secure_chat.audit", level=logging.INFO)
-    handler = RotatingFileHandler(path, maxBytes=1_048_576, backupCount=3, encoding="utf-8")
+    if app.config["AUDIT_LOG_TO_STDOUT"]:
+        handler = logging.StreamHandler(sys.stdout)
+    else:
+        path = Path(app.config["AUDIT_LOG_PATH"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=1_048_576, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logger.addHandler(handler)
     logger.propagate = False

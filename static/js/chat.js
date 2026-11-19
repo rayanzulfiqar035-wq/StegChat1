@@ -6,6 +6,7 @@ import {
 } from "./crypto.js";
 import { loadImage, usage } from "./stego.js";
 import { getIdentity, saveIdentity, getContact, saveContact, hasSeenSignature, markSignatureSeen } from "./keystore.js";
+import { createPhonebook } from "./phonebook.js";
 
 if (typeof io !== "function") throw new Error("Socket.IO client not loaded");
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
@@ -15,10 +16,33 @@ const recipientInput = element("recipient-input");
 const messageInput = element("message-input");
 const sendButton = element("send-btn");
 const coverInput = element("cover-image");
-const maxStegoBytes = Number(document.querySelector(".chat-panel").dataset.maxStegoBytes);
+const chatPanel = document.querySelector(".chat-panel");
+const maxStegoBytes = Number(chatPanel.dataset.maxStegoBytes);
+const requiresCover = chatPanel.dataset.requireCover === "true";
 const usedCovers = new Set();
 let selectedCover = null, coverSize = null, coverLoading = false, coverTooLarge = false;
 let coverRequest = 0;
+let coverPreviewUrl = null;
+
+function previewCover(file = null) {
+  if (coverPreviewUrl) URL.revokeObjectURL(coverPreviewUrl);
+  coverPreviewUrl = null;
+  const preview = element("selected-cover-preview");
+  if (preview) {
+    preview.removeAttribute("src");
+    preview.classList.toggle("is-hidden", !file);
+    element("cover-preview-empty").classList.toggle("is-hidden", !!file);
+    if (file) {
+      coverPreviewUrl = URL.createObjectURL(file);
+      preview.src = coverPreviewUrl;
+    }
+  }
+  // SECURITY: display a filename as text; never parse it as HTML.
+  element("cover-filename").textContent = file ? file.name : "No image selected";
+}
+window.addEventListener("pagehide", (event) => {
+  if (!event.persisted && coverPreviewUrl) URL.revokeObjectURL(coverPreviewUrl);
+});
 
 function updateCoverUsage() {
   coverTooLarge = false;
@@ -41,6 +65,7 @@ function removeCover() {
   ++coverRequest;
   selectedCover = null; coverSize = null; coverLoading = false; coverTooLarge = false;
   coverInput.value = "";
+  previewCover();
   element("cover-usage").textContent = "";
   element("cover-warning").textContent = "";
   updateSendButton();
@@ -49,6 +74,7 @@ function removeCover() {
 coverInput.addEventListener("change", async () => {
   const request = ++coverRequest;
   selectedCover = null; coverSize = null; coverTooLarge = false;
+  previewCover();
   element("cover-usage").textContent = "";
   element("cover-warning").textContent = "";
   coverLoading = true;
@@ -59,6 +85,7 @@ coverInput.addEventListener("change", async () => {
     const image = await loadImage(file);
     if (request !== coverRequest) return;
     selectedCover = file;
+    previewCover(file);
     coverSize = { width: image.width, height: image.height };
     updateCoverUsage();
   } catch {
@@ -83,6 +110,17 @@ let settingUpIdentity = false;
 let recipientTimer;
 let incomingQueue = Promise.resolve();
 const rejectedDeliveries = new Map();
+const phonebook = createPhonebook({ socket, onChange: () => {
+  clearTimeout(recipientTimer);
+  if (!phonebook.isAccepted(selectedRecipient())) {
+    ++contactRequest;
+    currentRecipientKeyData = null;
+    element("contact-security-bar").classList.add("is-hidden");
+  } else if (localIdentity) {
+    recipientTimer = setTimeout(() => checkContactKeys(selectedRecipient()), 300);
+  }
+  updateSendButton();
+} });
 
 async function acknowledge(id) {
   return new Promise((resolve) => {
@@ -92,12 +130,59 @@ async function acknowledge(id) {
   });
 }
 
-function showRejectedDelivery(id) {
-  if (!Number.isSafeInteger(id) || id <= 0 || rejectedDeliveries.has(id)) return;
+function deliveryFailure(error) {
+  // SECURITY: fixed explanations only; never display a payload or raw error.
+  const failures = {
+    decryption_failed: ["could not decrypt with this browser's keys", "Message could not be decrypted",
+      "This browser could not open the message with its current keys. If your keys were reset after it was sent, ask the sender to send it again. For an image message, they must use a fresh cover PNG."],
+    lookup_limited: ["public-key lookup temporarily limited", "Public-key lookup temporarily limited",
+      "Wait a minute, then refresh this page to retry the delivery."],
+    session_expired: ["session expired", "Sign in again to receive this message",
+      "Your session has expired. Sign in again in this browser, then reopen Chat."],
+    keys_missing: ["sender keys unavailable", "Sender's public keys are unavailable",
+      "Ask the sender to open Chat and finish setting up their keys, then refresh this page."],
+    "contact not approved": ["contact not approved", "Sender is not an approved contact",
+      "Add the sender through your phonebook and accept the contact request before receiving their messages."],
+    "sender key requires explicit trust": ["sender key requires explicit trust", "Sender's key needs your approval",
+      "Compare fingerprints with the sender through a separate trusted channel. If the change is expected, use Trust new key above, then refresh this page to retry."],
+    "bad signature": ["bad signature", "Sender's signature could not be verified",
+      "The message may have changed or been signed with an older sender key. Compare fingerprints and ask the sender to send it again."],
+    "message too old": ["message too old", "Message is too old to accept",
+      "This message is outside the seven-day acceptance window. Ask the sender to send it again."],
+    "timestamp in the future": ["timestamp in the future", "Message timestamp is in the future",
+      "Check the clocks on both devices. Refresh to retry once the timestamp is valid, or ask the sender to send it again."],
+    "not for this user": ["not for this user", "Message is addressed to another account",
+      "This account cannot open this delivery."],
+  };
+  const known = Object.hasOwn(failures, error.code) ? failures[error.code]
+    : Object.hasOwn(failures, error.message) ? failures[error.message] : null;
+  const [reason, title, detail] = known || [
+    "validation or decryption failed", "Message delivery could not be completed",
+    "Check your connection and browser storage, then refresh this page to retry. If the problem continues, ask the sender to send it again.",
+  ];
+  return { reason, title, detail };
+}
+
+function showRejectedDelivery(id, failure) {
+  if (!Number.isSafeInteger(id) || id <= 0) return;
+  const existing = rejectedDeliveries.get(id);
+  if (existing) {
+    existing.querySelector(".rejected-title").textContent = failure.title;
+    existing.querySelector(".rejected-detail").textContent = failure.detail;
+    return;
+  }
   const notice = document.createElement("div");
   notice.className = "rejected-delivery";
+  notice.dataset.deliveryId = String(id);
+  const title = document.createElement("strong");
+  title.className = "rejected-title";
+  title.textContent = failure.title;
+  const detail = document.createElement("p");
+  detail.className = "rejected-detail";
+  detail.textContent = failure.detail;
   const label = document.createElement("p");
-  label.textContent = "A message was rejected and remains pending. You can reconnect to retry it or dismiss it permanently.";
+  label.className = "rejected-retention";
+  label.textContent = "The encrypted delivery remains pending. Dismissing permanently removes this delivery.";
   const button = document.createElement("button");
   button.type = "button";
   button.className = "btn btn--ghost btn--small";
@@ -113,7 +198,7 @@ function showRejectedDelivery(id) {
       setStatus("Could not confirm dismissal. Reconnect to check pending messages.", "error");
     }
   });
-  notice.append(label, button);
+  notice.append(title, detail, label, button);
   element("messages-list").appendChild(notice);
   rejectedDeliveries.set(id, notice);
 }
@@ -124,6 +209,8 @@ function setStatus(text, type = "info") {
 }
 function updateSendButton() {
   sendButton.disabled = !localIdentity || !socket.connected || checkingContact || sending
+    || !phonebook.isAccepted(selectedRecipient())
+    || (requiresCover && !selectedCover)
     || coverLoading || coverTooLarge || (coverInput.files.length > 0 && !selectedCover)
     || !currentRecipientKeyData || currentRecipientKeyData.username !== selectedRecipient()
     || changedContacts.has(selectedRecipient());
@@ -324,6 +411,10 @@ async function checkContactKeys(username) {
   updateSendButton();
   try {
     if (!/^[a-z0-9_]{3,32}$/.test(username)) return null;
+    if (!phonebook.isAccepted(username)) {
+      setStatus("Choose an approved phonebook contact. Send a request and wait for acceptance first.", "error");
+      return null;
+    }
     const live = await fetchKeys(username);
     // SECURITY: discard responses for obsolete selections before trusting them.
     if (request !== contactRequest || selectedRecipient() !== username) return null;
@@ -377,6 +468,8 @@ async function handleIncoming(payload) {
     || payload.img.length > 4 * Math.ceil(maxStegoBytes / 3))) throw new Error("image too large");
   const env = assertMessageEnvelope(payload);
   if (env.recipient !== currentUsername) throw new Error("not for this user");
+  if (!phonebook.isAccepted(env.sender)) await phonebook.refresh();
+  if (!phonebook.isAccepted(env.sender)) throw new Error("contact not approved");
   // SECURITY: TOFU, signature, timestamp, replay, decrypt, render, record seen.
   const keys = await fetchKeys(env.sender);
   if (!(await trustContact(env.sender, keys))) throw new Error("sender key requires explicit trust");
@@ -390,7 +483,16 @@ async function handleIncoming(payload) {
     setStatus("Duplicate skipped: replayed message");
     return;
   }
-  const text = await (env.kind === "stego" ? decryptStego : decryptText)({ ownEcdhPrivateKey: localIdentity.ecdhPrivateKey, env });
+  let text;
+  try {
+    text = await (env.kind === "stego" ? decryptStego : decryptText)({ ownEcdhPrivateKey: localIdentity.ecdhPrivateKey, env });
+  } catch {
+    // SECURITY: a verified signature does not imply our current key can decrypt
+    // an older delivery. Retain the row; never reset keys or acknowledge it here.
+    const error = new Error("decryption failed");
+    error.code = "decryption_failed";
+    throw error;
+  }
   appendMessage(env.sender, text, false, env.kind);
   await markSignatureSeen(hash);
   rejectedDeliveries.get(payload.id)?.remove();
@@ -402,21 +504,26 @@ socket.on("message", (payload) => {
   incomingQueue = incomingQueue.then(async () => {
     try { await handleIncoming(payload); }
     catch (error) {
-      const reasons = new Set(["replayed message", "message too old", "timestamp in the future",
-        "bad signature", "not for this user", "sender key requires explicit trust"]);
-      setStatus(`Message rejected: ${reasons.has(error.message) ? error.message : "validation or decryption failed"}`, "error");
-      showRejectedDelivery(payload?.id);
+      const failure = deliveryFailure(error);
+      setStatus(`Message rejected: ${failure.reason}`, "error");
+      showRejectedDelivery(payload?.id, failure);
     }
   });
 });
 element("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (sending) return;
-  if (coverLoading || coverTooLarge || (coverInput.files.length && !selectedCover)) {
+  // SECURITY: image sends require a cover, preventing an accidental text send.
+  if ((requiresCover && !selectedCover) || coverLoading || coverTooLarge
+    || (coverInput.files.length && !selectedCover)) {
     setStatus("Choose a valid cover image and keep usage at or below 50%.", "error");
     return;
   }
   const recipient = selectedRecipient();
+  if (!phonebook.isAccepted(recipient)) {
+    setStatus("Choose an approved phonebook contact. Send a request and wait for acceptance first.", "error");
+    return;
+  }
   const text = messageInput.value;
   const cover = selectedCover, attachment = coverRequest;
   if (!/^[a-z0-9_]{3,32}$/.test(recipient) || !text.trim() || text.length > 2000) {
@@ -449,7 +556,8 @@ element("chat-form").addEventListener("submit", async (event) => {
     const result = cover ? await encryptStego({ ...params, coverBlob: cover, maxStegoBytes }) : null;
     const envelope = result ? result.envelope : await encryptText(params);
     if (selectedRecipient() !== recipient || localIdentity !== identity
-      || currentRecipientKeyData !== keys || changedContacts.has(recipient) || attachment !== coverRequest) return;
+      || currentRecipientKeyData !== keys || changedContacts.has(recipient)
+      || !phonebook.isAccepted(recipient) || attachment !== coverRequest) return;
     // SECURITY: reserve a cover before emitting, including uncertain delivery.
     if (coverHash) usedCovers.add(coverHash);
     const ack = await new Promise((resolve, reject) => {
@@ -460,7 +568,7 @@ element("chat-form").addEventListener("submit", async (event) => {
     if (!ack?.ok) {
       // Even a rejected envelope transmitted a carrier; keep it reserved.
       if (coverHash) element("cover-warning").textContent = "This cover was transmitted. Choose a fresh image for another attempt.";
-      const reasons = new Set(["queue_full", "rate_limited", "recipient not found", "message too large", "image too large", "unauthorized"]);
+      const reasons = new Set(["queue_full", "rate_limited", "recipient not found", "message too large", "image too large", "unauthorized", "contact not approved"]);
       setStatus(`Message not sent: ${reasons.has(ack?.error) ? ack.error : "server rejected the envelope"}`, "error");
       return;
     }
@@ -482,4 +590,5 @@ window.e2ee = { socket, selfTest: async (options = {}) => {
   return selfTest({ identity: identity ? identityKeyPairs(identity) : undefined, ...options });
 } };
 updateSendButton();
+void phonebook.refresh();
 initIdentity();

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block body_class %}workspace-page{% block workspace_body_class %}{% endblock %}{% endblock %}
+{% block main_class %}workspace-main-outer{% endblock %}
+{% block site_header %}{% endblock %}
+{% block site_footer %}{% endblock %}
+{% block content %}
+<div class="workspace" id="workspace">
+  <aside class="sidebar" id="sidebar" aria-label="Workspace navigation">
+    <div class="sidebar-top">
+      <a class="app-brand" href="{{ url_for('auth.chat_placeholder') }}" aria-label="StegChat home">{{ icon('brand') }}<span class="sidebar-label">StegChat<span class="brand-dot">.</span></span></a>
+      <button id="sidebar-toggle" class="icon-button" type="button" aria-label="Collapse sidebar" aria-controls="sidebar-navigation" aria-expanded="true">{{ icon('sidebar') }}</button>
+    </div>
+    <span class="eyebrow sidebar-label sidebar-section-label">YOUR WORKSPACE</span>
+    <nav class="sidebar-navigation" id="sidebar-navigation" aria-label="Chat and steganography">
+      <a class="sidebar-link{% if request.path == '/chat' %} is-active{% endif %}" href="{{ url_for('auth.chat_placeholder') }}"{% if request.path == '/chat' %} aria-current="page"{% endif %} title="Chat">{{ icon('chat') }}<span class="sidebar-label">Chat</span></a>
+      <a class="sidebar-link{% if request.path.startswith('/stego') %} is-active{% endif %}" href="{{ url_for('stego') }}"{% if request.path.startswith('/stego') %} aria-current="page"{% endif %} title="Stego">{{ icon('layers') }}<span class="sidebar-label">Stego</span></a>
+      {% if config.STEGO_LAB %}
+      <a class="sidebar-link sidebar-lab-link" href="{{ url_for('stego_lab') }}" title="Local stego lab">{{ icon('flask') }}<span class="sidebar-label">Local lab</span></a>
+      {% endif %}
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="sidebar-privacy sidebar-label">{{ icon('shield') }}<p>Private by design.<br><span>Encrypted from end to end.</span></p></div>
+      <div class="sidebar-account"><span class="account-avatar" aria-hidden="true">{{ current_user.username[:1]|upper }}</span><div class="sidebar-label"><strong>{{ current_user.username }}</strong><span>Your workspace</span></div></div>
+      <form method="post" action="{{ url_for('auth.logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="sidebar-link sidebar-logout" type="submit" title="Log out">{{ icon('exit') }}<span class="sidebar-label">Log out</span></button>
+      </form>
+    </div>
+  </aside>
+  <div class="workspace-content">
+    {% block workspace_content %}{% endblock %}
+    <div class="workspace-footnote">{{ icon('lock') }}<span>Only you and your recipient can read your messages.</span></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{{ url_for('static', filename='js/navigation.js') }}"></script>
+{% block workspace_scripts %}{% endblock %}
+{% endblock %}

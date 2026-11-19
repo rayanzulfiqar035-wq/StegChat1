@@ -19,6 +19,7 @@ certs/
 
 # Runtime data
 instance/
+public/
 *.db
 *.sqlite
 *.sqlite3

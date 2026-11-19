@@ -167,6 +167,7 @@ try {
     await call("Page.enable", {}, sessionId);
     await call("Network.enable", {}, sessionId);
     await call("Runtime.enable", {}, sessionId);
+    await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, sessionId);
     if (script) await call("Page.addScriptToEvaluateOnNewDocument", { source: script }, sessionId);
     return result;
   }
@@ -175,6 +176,17 @@ try {
     const result = await call("Page.navigate", { url: base + route }, page.id);
     assert(!result.errorText, result.errorText);
     await wait(page, "!window.__previousDocument && document.readyState === 'complete' && !!document.querySelector('meta[name=\"csrf-token\"]')");
+  }
+  async function captureUi(name, target) {
+    if (!process.env.UI_SCREENSHOT_DIR) return;
+    const directory = path.resolve(process.env.UI_SCREENSHOT_DIR);
+    await fs.mkdir(directory, { recursive: true });
+    await wait(target,"document.readyState==='complete' && document.documentElement.clientWidth>0");
+    await evaluate(target,'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    const { cssContentSize: size } = await call('Page.getLayoutMetrics', {}, target.id);
+    const shot = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 } }, target.id);
+    await fs.writeFile(path.join(directory, name + '.png'), Buffer.from(shot.data, 'base64'));
   }
   const uploadProbe = `{
     const original = window.fetch;
@@ -196,11 +208,27 @@ try {
     })()`);
     await navigate(page, "/chat");
   }
+  const entry = await page();
+  await navigate(entry, '/');
+  check('website entry opens login with a registration link and local messaging illustration', await evaluate(entry,
+    "location.pathname==='/login' && !!document.querySelector('a[href=\"/register\"]') && document.querySelector('.auth-illustration').naturalWidth>0"));
+  await captureUi('login-desktop', entry);
+  await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, entry.id);
+  check('login fits a mobile viewport without horizontal overflow', await evaluate(entry,
+    'document.documentElement.scrollWidth<=window.innerWidth'));
+  await captureUi('login-mobile', entry);
   const alice = await page(uploadProbe), bob = await page(uploadProbe);
   await account(alice, "alice"); await account(bob, "bob");
   const identityReady = "window.e2ee?.socket.connected && /^[0-9A-F]{4} /.test(document.getElementById('my-fingerprint').textContent)";
   await wait(alice, identityReady); await wait(bob, identityReady);
   check("two isolated browser sessions load trusted HTTPS with Web Crypto", await evaluate(alice, "isSecureContext && !!crypto.subtle"));
+  check('sidebar exposes Chat and Stego with the encrypted-send shortcut', await evaluate(alice,
+    "!!document.querySelector('.sidebar a[href=\"/chat\"]') && !!document.querySelector('.sidebar a[href=\"/stego\"]') && !!document.querySelector('.stego-send-link[href=\"/stego\"]')"));
+  await captureUi('chat-desktop', alice);
+  await evaluate(alice,"document.getElementById('sidebar-toggle').click()");
+  check('sidebar collapses with accessible state and remains navigable', await evaluate(alice,
+    "document.getElementById('workspace').dataset.sidebarCollapsed==='true' && document.getElementById('sidebar-toggle').getAttribute('aria-expanded')==='false' && document.querySelector('.sidebar a[href=\"/stego\"]').getBoundingClientRect().width>0"));
+  await evaluate(alice,"document.getElementById('sidebar-toggle').click()");
   check("connections use WSS", [alice, bob].every((p) => p.urls.some((url) => url.startsWith(`wss://localhost:${port}/`))));
   check("first initialization uploads exactly once per account", [alice, bob].every((p) => p.uploads.filter((m) => m === "POST").length === 1));
   check("private identity committed before public-key upload", await evaluate(alice, "window.__storedBeforeUpload") && await evaluate(bob, "window.__storedBeforeUpload"));
@@ -220,12 +248,33 @@ try {
     return evaluate(page, "window.__lastEnvelope");
   }
   const contains = (text) => `Array.from(document.querySelectorAll('.message-item--incoming .message-body')).some(x=>x.textContent===${JSON.stringify(text)})`;
+  await evaluate(alice,`{
+    document.getElementById('recipient-input').value='bob';document.getElementById('recipient-input').dispatchEvent(new Event('input'));
+    document.getElementById('message-input').value='not approved';document.getElementById('chat-form').dispatchEvent(new Event('submit',{cancelable:true}));
+  }`);
+  check('phonebook blocks sending to a stranger before encryption',await evaluate(alice,
+    "document.getElementById('send-btn').disabled && !window.__lastEnvelope && document.getElementById('chat-status').textContent.includes('approved phonebook contact')"));
+  await evaluate(alice,`{
+    document.getElementById('phonebook-username').value='bob';document.getElementById('phonebook-form').dispatchEvent(new Event('submit',{cancelable:true}));
+  }`);
+  await wait(bob,"!!document.querySelector('.phonebook-entry[data-username=\"alice\"][data-status=\"incoming\"]')");
+  await wait(alice,"!!document.querySelector('.phonebook-entry[data-username=\"bob\"][data-status=\"outgoing\"]')");
+  check('phonebook request reaches recipient while messaging remains blocked',await evaluate(alice,
+    "!!document.querySelector('.phonebook-entry[data-username=\"bob\"][data-status=\"outgoing\"]') && document.getElementById('send-btn').disabled"));
+  await evaluate(bob,"document.querySelector('.phonebook-entry[data-username=\"alice\"] button').click()");
+  for(const [target,peer] of [[alice,'bob'],[bob,'alice']])await wait(target,
+    `!!document.querySelector('.phonebook-entry[data-username="${peer}"][data-status="accepted"]')`);
+  check('recipient acceptance adds both users to their phonebooks',true);
   const keyless = await page();
   await navigate(keyless, '/register');
   await evaluate(keyless, `(async()=>{
     const csrf=document.querySelector('meta[name="csrf-token"]').content;
     await fetch('/register',{method:'POST',body:new URLSearchParams({username:'keyless',password:'browser-test-password-123',confirm:'browser-test-password-123',csrf_token:csrf})});
+    await fetch('/login',{method:'POST',body:new URLSearchParams({username:'keyless',password:'browser-test-password-123',csrf_token:csrf})});
   })()`);
+  await evaluate(alice,`fetch('/api/contacts',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':document.querySelector('meta[name="csrf-token"]').content},body:JSON.stringify({username:'keyless'})}).then(r=>r.status)`);
+  await evaluate(keyless,`fetch('/api/contacts/alice/accept',{method:'POST',headers:{'X-CSRFToken':document.querySelector('meta[name="csrf-token"]').content}}).then(r=>r.status)`);
+  await wait(alice,"!!document.querySelector('.phonebook-entry[data-username=\"keyless\"][data-status=\"accepted\"]')");
   await evaluate(alice, "document.getElementById('recipient-input').value='keyless';document.getElementById('recipient-input').dispatchEvent(new Event('input'))");
   await wait(alice, "document.getElementById('chat-status').textContent.includes('has not set up')");
   check('registered contact without keys explains first-login setup and blocks send', await evaluate(alice, "document.getElementById('send-btn').disabled && document.querySelector('#alert-actions button').textContent==='Retry contact lookup'"));
@@ -238,8 +287,8 @@ try {
   await wait(alice, "!document.getElementById('send-btn').disabled");
   check('retry succeeds after contact opens Chat without resetting any identity', await evaluate(alice, "document.getElementById('security-alert').classList.contains('is-hidden')"));
   await evaluate(alice, "document.getElementById('recipient-input').value='not_registered';document.getElementById('recipient-input').dispatchEvent(new Event('input'))");
-  await wait(alice, "document.getElementById('chat-status').textContent.includes('No account has')");
-  check('unknown usernames get a distinct actionable explanation', await evaluate(alice, "document.getElementById('send-btn').disabled"));
+  await wait(alice, "document.getElementById('chat-status').textContent.includes('approved phonebook contact')");
+  check('usernames outside the phonebook cannot be selected for sending', await evaluate(alice, "document.getElementById('send-btn').disabled"));
   for (const [status, explanation] of [[401,'session has expired'],[429,'Wait a minute']]) {
     await evaluate(alice, `{
       window.__lookupFetch=window.fetch;
@@ -285,6 +334,19 @@ try {
   await wait(bob, "document.getElementById('chat-status').textContent.includes('bad signature')");
   check("tampered ciphertext rejected by signature before decryption", await evaluate(bob, "document.querySelectorAll('.message-item--incoming').length") === incomingCount);
 
+  // Regression: queued PNGs addressed to an old recipient key cannot be
+  // recovered by resetting that identity. Never weaken verification to show it.
+  await evaluate(bob,"void e2ee.socket.disconnect()");
+  const oldRecipientKeyPng=await evaluate(alice,`(async()=>{
+    const c=await import('/static/js/crypto.js'),k=await import('/static/js/keystore.js'),s=await import('/static/js/stego.js');
+    const identity=await k.getIdentity('alice'),peer=await(await fetch('/api/users/bob/keys')).json();
+    const canvas=document.createElement('canvas');canvas.width=canvas.height=256;
+    const ctx=canvas.getContext('2d');ctx.fillStyle='rgb(40,90,160)';ctx.fillRect(0,0,256,256);
+    return (await c.encryptStego({ownIdentity:{ecdh:{privateKey:identity.ecdhPrivateKey,publicKey:identity.ecdhPublicKey},ecdsa:{privateKey:identity.ecdsaPrivateKey,publicKey:identity.ecdsaPublicKey}},
+      recipientEcdhJwk:peer.ecdh_jwk,sender:'alice',recipient:'bob',text:'PNG queued before recipient reset',coverBlob:await s.pngBlob(canvas)})).envelope;
+  })()`);
+  const oldRecipientKeyAck=await emit(alice,oldRecipientKeyPng);
+  check('encrypted PNG is queued while recipient is offline before a key reset',oldRecipientKeyAck.ok);
   const oldFingerprint = await evaluate(bob, "document.getElementById('my-fingerprint').textContent");
   await evaluate(bob, "(async()=>{const k=await import('/static/js/keystore.js');await k.clearIdentity('bob');})()");
   await navigate(bob, "/chat");
@@ -293,6 +355,12 @@ try {
   await evaluate(bob, "document.querySelector('#alert-actions button').click()");
   await wait(bob, identityReady);
   check("explicit reset publishes new keys", bob.uploads.filter((m) => m === "PUT").length === 1 && await evaluate(bob, "document.getElementById('my-fingerprint').textContent") !== oldFingerprint);
+  await wait(bob,`document.querySelector('.rejected-delivery[data-delivery-id="${oldRecipientKeyAck.id}"] .rejected-title')?.textContent==='Message could not be decrypted'`);
+  check('old-recipient-key PNG stays pending without rendering or acknowledgment',
+    !await evaluate(bob,contains('PNG queued before recipient reset'))
+    && await evaluate(bob,`fetch('/__test/pending').then(r=>r.json()).then(rows=>rows.some(r=>r.id===${oldRecipientKeyAck.id}))`));
+  check('decryption rejection explains key reset and asks for a fresh cover',await evaluate(bob,
+    `document.querySelector('.rejected-delivery[data-delivery-id="${oldRecipientKeyAck.id}"] .rejected-detail').textContent.includes('keys were reset') && document.querySelector('.rejected-delivery[data-delivery-id="${oldRecipientKeyAck.id}"] .rejected-detail').textContent.includes('fresh cover PNG')`));
   await select(bob, "alice");
   await send(bob, "untrusted replacement key test");
   await wait(alice, "document.getElementById('chat-status').textContent.includes('explicit trust')");
@@ -309,14 +377,14 @@ try {
   check("both directions work after explicit trust", true);
   check("on-screen contact fingerprint matches peer fingerprint", await evaluate(alice, "document.getElementById('contact-fingerprint').textContent") === await evaluate(bob, "document.getElementById('my-fingerprint').textContent"));
   await evaluate(alice, `{
-    const i=document.getElementById('recipient-input');i.value='alice';i.dispatchEvent(new Event('input'));
+    const i=document.getElementById('recipient-input');i.value='keyless';i.dispatchEvent(new Event('input'));
     document.getElementById('message-input').value='recipient switching test';
     document.getElementById('chat-form').dispatchEvent(new Event('submit',{cancelable:true}));
   }`);
-  await wait(alice, contains("recipient switching test"));
+  await wait(keyless, contains("recipient switching test"));
   const switched = await evaluate(alice, "window.__lastEnvelope");
   const decryptsAsBob = await evaluate(bob, `(async()=>{const c=await import('/static/js/crypto.js'),k=await import('/static/js/keystore.js'),i=await k.getIdentity('bob');try{await c.decryptText({ownEcdhPrivateKey:i.ecdhPrivateKey,env:${JSON.stringify(switched)}});return true;}catch{return false;}})()`);
-  check("immediate recipient switching never reuses the previous contact key", switched.recipient === "alice" && !decryptsAsBob);
+  check("immediate recipient switching never reuses the previous contact key", switched.recipient === "keyless" && !decryptsAsBob);
 
   const migration = await page();
   await navigate(migration, "/");
@@ -348,6 +416,19 @@ try {
   // Step 7: retain a real encrypted offline delivery until rendered and ACKed.
   const pendingRows = () => evaluate(alice, "fetch('/__test/pending').then(r=>r.json())");
   await select(alice, "bob");
+  await evaluate(bob,`{
+    window.__receiveFetch=window.fetch;
+    window.fetch=function(url,options){if(url==='/api/users/alice/keys')return Promise.resolve(new Response('{}',{status:429}));return window.__receiveFetch.call(this,url,options);};
+  }`);
+  const deferredLookup=await send(alice,'retry after temporary key lookup limit');
+  await wait(bob,"Array.from(document.querySelectorAll('.rejected-title')).some(n=>n.textContent==='Public-key lookup temporarily limited')");
+  const deferredRow=(await pendingRows()).find(row=>row.ct===deferredLookup.ct);
+  check('temporary receive lookup limit has its own reason and retains the row',!!deferredRow
+    && !await evaluate(bob,contains('retry after temporary key lookup limit')));
+  await evaluate(bob,"window.fetch=window.__receiveFetch;e2ee.socket.disconnect();void e2ee.socket.connect()");
+  await wait(bob,contains('retry after temporary key lookup limit'));
+  await wait(alice,`fetch('/__test/pending').then(r=>r.json()).then(rows=>!rows.some(row=>row.id===${deferredRow?.id}))`);
+  check('retry after temporary lookup failure decrypts and acknowledges normally',true);
   await evaluate(bob, "void e2ee.socket.disconnect()");
   const offlineEnvelope = await send(alice, "offline queued delivery");
   let rows = await pendingRows();
@@ -389,7 +470,43 @@ try {
     && (await pendingRows()).length===0);
 
   // Step 10: encrypted PNG through the actual chat controls and pending queue.
-  await select(alice, 'bob');
+  const chatFingerprintBeforeNavigation=await evaluate(alice,"document.getElementById('my-fingerprint').textContent");
+  await evaluate(alice,"document.querySelector('.stego-send-link').click()");
+  await wait(alice,"location.pathname==='/stego' && !!document.querySelector('.transport-card')");
+  check('stego button offers exactly image, audio and text transports', await evaluate(alice,
+    "Array.from(document.querySelectorAll('.transport-card')).map(a=>a.getAttribute('href')).join(',')==='/stego/image,/stego/audio,/stego/text'"));
+  await captureUi('transport-desktop',alice);
+  for(const transport of ['audio','text']){
+    await navigate(alice,'/stego/'+transport);
+    check(transport+' placeholder clearly disables processing and opens no chat socket',await evaluate(alice,
+      "!!document.querySelector('fieldset[disabled]') && document.querySelector('.placeholder-panel').textContent.includes('Coming soon') && !window.e2ee"));
+    await captureUi(transport+'-placeholder',alice);
+  }
+  await navigate(alice,'/stego');
+  await evaluate(alice,"document.querySelector('a[href=\"/stego/image\"]').click()");
+  await wait(alice,"location.pathname==='/stego/image' && window.e2ee?.socket.connected && document.getElementById('my-fingerprint').textContent!=='Loading...'");
+  check('image page preserves the saved identity and requires a PNG before sending',await evaluate(alice,
+    "document.getElementById('my-fingerprint').textContent==="+JSON.stringify(chatFingerprintBeforeNavigation)+" && document.getElementById('send-btn').disabled && document.querySelector('.chat-panel').dataset.requireCover==='true'"));
+  await captureUi('image-desktop',alice);
+  await evaluate(alice,`{
+    const emit=e2ee.socket.emit;
+    e2ee.socket.emit=function(event,...args){if(event==='send_message')window.__lastEnvelope=args[0];return emit.call(this,event,...args);};
+    document.getElementById('recipient-input').value='bob';document.getElementById('recipient-input').dispatchEvent(new Event('input'));
+    document.getElementById('message-input').value='requires a PNG';document.getElementById('chat-form').dispatchEvent(new Event('submit',{cancelable:true}));
+  }`);
+  check('image composer refuses a forced submit without a cover instead of sending text',await evaluate(alice,
+    "!window.__lastEnvelope && document.getElementById('chat-status').textContent.includes('valid cover')"));
+  await call('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true},alice.id);
+  await wait(alice,"document.getElementById('workspace').dataset.sidebarCollapsed==='true'");
+  check('image composer fits a mobile viewport without horizontal overflow',await evaluate(alice,
+    "document.documentElement.scrollWidth<=document.documentElement.clientWidth && document.querySelector('.chat-panel').getBoundingClientRect().width>=250 && document.querySelector('.workspace-content').getBoundingClientRect().x>=70"));
+  await evaluate(alice,"document.getElementById('sidebar-toggle').click()");
+  check('mobile sidebar overlays without squeezing the composer',await evaluate(alice,
+    "document.getElementById('workspace').dataset.sidebarCollapsed==='false' && document.querySelector('.chat-panel').getBoundingClientRect().width>=250"));
+  await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27},alice.id);
+  await wait(alice,"document.getElementById('workspace').dataset.sidebarCollapsed==='true'");
+  await captureUi('image-mobile',alice);
+  await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false},alice.id);
   await evaluate(bob, "fetch('/logout',{method:'POST',headers:{'X-CSRFToken':document.querySelector('meta[name=\"csrf-token\"]').content}}).then(r=>r.status)");
   await evaluate(alice, `(async()=>{
     const s=await import('/static/js/stego.js'),canvas=document.createElement('canvas');
@@ -399,6 +516,8 @@ try {
     document.getElementById('cover-image').files=dt.files;document.getElementById('cover-image').dispatchEvent(new Event('change'));
   })()`);
   await wait(alice, "document.getElementById('cover-usage').textContent.includes('capacity') && !document.getElementById('send-btn').disabled");
+  check('image composer previews the locally selected PNG',await evaluate(alice,
+    "document.getElementById('selected-cover-preview').src.startsWith('blob:') && !document.getElementById('selected-cover-preview').classList.contains('is-hidden')"));
   await evaluate(alice,"document.getElementById('message-input').value='界'.repeat(2000);document.getElementById('message-input').dispatchEvent(new Event('input'))");
   check('chat warns above ten percent capacity using UTF-8 bytes',await evaluate(alice,"document.getElementById('cover-warning').textContent.includes('Above 10%')"));
   const stegoText='offline encrypted PNG message ✓';
@@ -482,6 +601,12 @@ try {
   check('encrypted payload above fifty percent is refused',await evaluate(alice,`(async()=>{
     const c=await import('/static/js/crypto.js');try{await c.encryptStego({...window.__stegoParams,text:'x'.repeat(12257)});return false;}catch(e){return e.message.includes('50%');}
   })()`));
+
+  await evaluate(bob,"Array.from(document.querySelectorAll('.phonebook-entry[data-username=\"alice\"] button')).find(b=>b.textContent==='Remove').click()");
+  await wait(alice,"!document.querySelector('.phonebook-entry[data-username=\"bob\"]') && document.getElementById('send-btn').disabled");
+  check('removing a contact updates the other phonebook and disables sending',true);
+  const afterRemoval=await emit(alice,stegoSecond);
+  check('direct encrypted PNG send is rejected after contact removal',!afterRemoval.ok&&afterRemoval.error==='contact not approved');
 
   await evaluate(alice, "fetch('/logout',{method:'POST',headers:{'X-CSRFToken':document.querySelector('meta[name=\"csrf-token\"]').content}}).then(r=>r.status)");
   await wait(alice, "!e2ee.socket.connected");

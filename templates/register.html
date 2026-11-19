@@ -1,9 +1,10 @@
-{% extends "base.html" %}
+{% extends "auth_layout.html" %}
 {% block title %}Register — Secure Chat{% endblock %}
 
-{% block content %}
-<section class="panel auth-panel">
-  <h1>Create account</h1>
+{% block auth_content %}
+  <span class="eyebrow">YOUR CONVERSATIONS START HERE</span>
+  <h2 class="auth-heading">Make it yours<span class="brand-dot">.</span></h2>
+  <p class="auth-intro">Create an account. Keep your conversations close.</p>
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}
@@ -17,7 +18,7 @@
 
     <div class="field">
       {{ form.username.label }}
-      {{ form.username(autocomplete="username", spellcheck="false") }}
+      {{ form.username(autocomplete="username", spellcheck="false", placeholder="Choose a username") }}
       {% for error in form.username.errors %}
         <span class="field-error">{{ error }}</span>
       {% endfor %}
@@ -25,7 +26,7 @@
 
     <div class="field">
       {{ form.password.label }}
-      {{ form.password(autocomplete="new-password") }}
+      {{ form.password(autocomplete="new-password", placeholder="At least 12 characters") }}
       {% for error in form.password.errors %}
         <span class="field-error">{{ error }}</span>
       {% endfor %}
@@ -34,17 +35,16 @@
 
     <div class="field">
       {{ form.confirm.label }}
-      {{ form.confirm(autocomplete="new-password") }}
+      {{ form.confirm(autocomplete="new-password", placeholder="Enter your password again") }}
       {% for error in form.confirm.errors %}
         <span class="field-error">{{ error }}</span>
       {% endfor %}
     </div>
 
     <div class="form-actions">
-      {{ form.submit(class="btn btn--primary") }}
+      {{ form.submit(class="btn btn--primary auth-submit") }}
     </div>
   </form>
 
   <p class="auth-alt">Already have an account? <a href="{{ url_for('auth.login') }}">Log in</a></p>
-</section>
 {% endblock %}
